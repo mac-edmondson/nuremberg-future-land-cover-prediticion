@@ -36,12 +36,11 @@ for h in hexes:
 base_df = pd.DataFrame({"Hexagon_ID": hexes})
 
 
-# --- Core Update Function ---
 def update_dashboard(start_year, end_year):
     """Generates dummy ML predictions and returns a map + metrics."""
     np.random.seed(int(start_year))
 
-    # 1. Mock the Machine Learning Output
+    # Mock the Machine Learning Output
     df = base_df.copy()
     df["Predicted Change (%)"] = np.random.normal(loc=0, scale=15, size=len(df))
     df["Dominant Class"] = np.random.choice(
@@ -51,7 +50,7 @@ def update_dashboard(start_year, end_year):
         ["High", "Medium", "Low"], size=len(df), p=[0.6, 0.3, 0.1]
     )
 
-    # 2. Build the Plotly Map
+    # Build the Plotly Map
     fig = px.choropleth_map(
         df,
         geojson=geojson,
@@ -63,10 +62,37 @@ def update_dashboard(start_year, end_year):
         zoom=11,
         center={"lat": lat_center, "lon": lon_center},
         map_style="carto-voyager",
-        opacity=0.2,
     )
-    fig.update_layout(coloraxis_showscale=False)
-    fig.update_layout(margin={"r": 0, "t": 0, "l": 0, "b": 0})
+    fig.update_layout(
+        coloraxis_showscale=False,
+        margin={"r": 0, "t": 0, "l": 0, "b": 0},
+        # Attempt to replicate the Leaflet Toolbar
+        modebar=dict(
+            orientation="v",  # Make it vertical
+            bgcolor="rgba(255, 255, 255, 0.9)",  # Give it a solid white background
+            color="black",  # Dark icons
+            activecolor="#0078A8",  # Leaflet's classic active blue color
+        ),
+        # Add drawing tools to the modebar
+        # TODO: Remove if not used
+        # modebar_add=[
+        #     "drawline",
+        #     "drawclosedpath",
+        #     "drawcircle",
+        #     "drawrect",
+        #     "eraseshape",
+        # ],
+    )
+
+    # Only show hexes that are selected.
+    fig.update_traces(
+        # Make everything nearly invisible by default
+        marker=dict(opacity=0.1),
+        # Make hexes visible when lassoed/boxed
+        selected=dict(marker=dict(opacity=0.8)),
+        # Ensure unselected hexes stay invisible
+        unselected=dict(marker=dict(opacity=0.0)),
+    )
 
     # 3. Mock the Evaluation Metrics
     acc = f"{np.random.uniform(85, 93):.1f}%"
@@ -82,7 +108,7 @@ def update_dashboard(start_year, end_year):
     return fig, metrics_display
 
 
-# --- Gradio UI Layout ---
+# Gradio UI
 with gr.Blocks() as app:
     gr.Markdown("# 🏙️ Nuremberg Urban Dynamics Dashboard")
     gr.Markdown("### Predicting and Analyzing Land-Cover Changes (Prototype)")
@@ -92,19 +118,20 @@ with gr.Blocks() as app:
             start_year_dropdown = gr.Dropdown(
                 choices=["2016", "2017", "2018", "2019"],
                 value="2019",
-                label="Select Forecast Year (vs 2020 Baseline)",
+                label="Start Year Selection",
             )
             end_year_dropdown = gr.Dropdown(
                 choices=[str(i) for i in range(2016, 2026)],
-                value="2019",
-                label="Select Forecast Year (vs 2020 Baseline)",
+                value="2020",
+                label="End Year Selection",
             )
+            clear_selection_button = gr.Button("Reset Map")
 
             gr.Markdown("### 📊 Performance Metrics")
             metrics_box = gr.Markdown(value="*Loading metrics...*")
 
         with gr.Column(scale=3):
-            map_output = gr.Plot()
+            map_output = gr.Plot(show_label=False)
 
     with gr.Row():
         gr.Markdown("""
@@ -118,12 +145,17 @@ with gr.Blocks() as app:
 
     start_year_dropdown.change(
         fn=update_dashboard,
-        inputs=start_year_dropdown,
+        inputs=[start_year_dropdown, end_year_dropdown],
         outputs=[map_output, metrics_box],
     )
     end_year_dropdown.change(
         fn=update_dashboard,
-        inputs=end_year_dropdown,
+        inputs=[start_year_dropdown, end_year_dropdown],
+        outputs=[map_output, metrics_box],
+    )
+    clear_selection_button.click(
+        fn=update_dashboard,
+        inputs=[start_year_dropdown, end_year_dropdown],
         outputs=[map_output, metrics_box],
     )
     app.load(
@@ -131,6 +163,16 @@ with gr.Blocks() as app:
         inputs=[start_year_dropdown, end_year_dropdown],
         outputs=[map_output, metrics_box],
     )
+
+# TODO: remove if unused
+# css = """
+# /* Force the Plotly modebar to the top-left corner */
+# .modebar-container {
+#     left: 10px !important;
+#     right: auto !important;
+#     top: 10px !important;
+# }
+# """
 
 if __name__ == "__main__":
     app.launch(theme=gr.themes.Monochrome())
