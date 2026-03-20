@@ -1,8 +1,12 @@
+import json
+
+import geopandas as gpd
 import gradio as gr
-import plotly.express as px
-import pandas as pd
-import numpy as np
 import h3
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from shapely.geometry import shape
 
 # --- Real Hexagon Data Generation (Nuremberg) ---
 lat_center = 49.4521
@@ -35,17 +39,82 @@ for h in hexes:
 
 base_df = pd.DataFrame({"Hexagon_ID": hexes})
 
+# 1. Load your CSV data
+# Replace 'your_data.csv' and 'polygon_column' with your actual file and column names
+df = pd.read_csv("data.csv")
+
+# 2. Parse the JSON strings into Shapely geometry objects
+# This reads that long string you pasted and turns it into a mathematical polygon
+df["geometry"] = df[".geo"].apply(lambda x: shape(json.loads(x)))
+
+# 3. Create a GeoDataFrame and explicitly tell it the current format is EPSG:3857 (meters)
+gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:3857")
+
+# 4. CRITICAL STEP: Reproject the coordinates to EPSG:4326 (Latitude/Longitude)
+gdf = gdf.to_crs("EPSG:4326")
+
+# 5. Create a unique ID for Plotly to link the map to your data
+# (If your CSV already has an ID column, you can use that instead)
+gdf["Hexagon_ID"] = gdf.index
+
+# 6. Convert the fixed geometries into the GeoJSON dictionary format Plotly expects
+plotly_geojson = json.loads(gdf.geometry.to_json())
+
+
+def map_class_to_string(cls: int):
+    try:
+        match int(cls):
+            case 10:
+                return "Tree Cover"
+            case 20:
+                return "Shrubland"
+            case 30:
+                return "Grassland"
+            case 40:
+                return "Cropland"
+            case 50:
+                return "Built-up"
+            case 60:
+                return "Bare / Sparse veg."
+            case 70:
+                return "Snow and Ice"
+            case 80:
+                return "Permanent Water"
+            case 90:
+                return "Herbaceous wetland"
+            case 95:
+                return "Mangroves"
+            case 100:
+                return "Moss and Lichen"
+            case _:
+                return "unclassified"
+    except ValueError:
+        return "unclassified"
+
+
+color_map = {
+    "Tree Cover": "#006400",
+    "Shrubland": "#ffbb22",
+    "Grassland": "#ffff4c",
+    "Cropland": "#f096ff",
+    "Built-up": "#fa0000",
+    "Bare / Sparse veg.": "#b4b4b4",
+    "Snow and Ice": "#f0f0f0",
+    "Permanent Water": "#0064ff",
+    "Herbaceous wetland": "#0096a0",
+    "Mangroves": "#00cf75",
+    "Moss and Lichen": "#fae6a0",
+    "unclassified": "#2c3e50",
+}
+
 
 def update_dashboard(start_year, end_year):
     """Generates dummy ML predictions and returns a map + metrics."""
     np.random.seed(int(start_year))
 
     # Mock the Machine Learning Output
-    df = base_df.copy()
-    df["Predicted Change (%)"] = np.random.normal(loc=0, scale=15, size=len(df))
-    df["Dominant Class"] = np.random.choice(
-        ["Built-up", "Tree Cover", "Grassland", "Cropland"], size=len(df)
-    )
+    df = gdf.copy()
+    df["Dominant Class"] = df["label"].apply(map_class_to_string)
     df["Confidence"] = np.random.choice(
         ["High", "Medium", "Low"], size=len(df), p=[0.6, 0.3, 0.1]
     )
@@ -53,10 +122,10 @@ def update_dashboard(start_year, end_year):
     # Build the Plotly Map
     fig = px.choropleth_map(
         df,
-        geojson=geojson,
+        geojson=plotly_geojson,
         locations="Hexagon_ID",
-        color="Predicted Change (%)",
-        color_continuous_scale="RdYlGn_r",
+        color="Dominant Class",
+        color_discrete_map=color_map,
         hover_name="Hexagon_ID",
         hover_data={"Hexagon_ID": False, "Dominant Class": True, "Confidence": True},
         zoom=11,
@@ -65,6 +134,16 @@ def update_dashboard(start_year, end_year):
     )
     fig.update_layout(
         coloraxis_showscale=False,
+        legend=dict(
+            orientation="v",  # Vertical orientation
+            yanchor="top",  # Anchor the top of the legend...
+            y=0.98,  # ...at 98% height (near the top)
+            xanchor="left",  # Anchor the left side of the legend...
+            x=0.02,  # ...at 2% width (near the left edge)
+            bgcolor="rgba(255, 255, 255, 0.7)",  # Add a background for readability
+            bordercolor="Black",
+            borderwidth=1,
+        ),
         margin={"r": 0, "t": 0, "l": 0, "b": 0},
         # Attempt to replicate the Leaflet Toolbar
         modebar=dict(
@@ -73,6 +152,7 @@ def update_dashboard(start_year, end_year):
             color="black",  # Dark icons
             activecolor="#0078A8",  # Leaflet's classic active blue color
         ),
+        height=700,  # TODO: Get this as an arg to the function if possible?
         # Add drawing tools to the modebar
         # TODO: Remove if not used
         # modebar_add=[
@@ -87,7 +167,7 @@ def update_dashboard(start_year, end_year):
     # Only show hexes that are selected.
     fig.update_traces(
         # Make everything nearly invisible by default
-        marker=dict(opacity=0.1),
+        marker=dict(opacity=0.2),
         # Make hexes visible when lassoed/boxed
         selected=dict(marker=dict(opacity=0.8)),
         # Ensure unselected hexes stay invisible
@@ -109,7 +189,7 @@ def update_dashboard(start_year, end_year):
 
 
 # Gradio UI
-with gr.Blocks() as app:
+with gr.Blocks(fill_height=True) as app:
     gr.Markdown("# 🏙️ Nuremberg Urban Dynamics Dashboard")
     gr.Markdown("### Predicting and Analyzing Land-Cover Changes (Prototype)")
 
