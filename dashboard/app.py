@@ -108,7 +108,7 @@ color_map = {
 }
 
 
-def update_dashboard(start_year, end_year):
+def update_dashboard(start_year, end_year, map_type):
     """Generates dummy ML predictions and returns a map + metrics."""
     np.random.seed(int(start_year))
 
@@ -130,7 +130,7 @@ def update_dashboard(start_year, end_year):
         hover_data={"Hexagon_ID": False, "Dominant Class": True, "Confidence": True},
         zoom=11,
         center={"lat": lat_center, "lon": lon_center},
-        map_style="carto-voyager",
+        map_style=map_type,
     )
     fig.update_layout(
         coloraxis_showscale=False,
@@ -195,6 +195,15 @@ with gr.Blocks(fill_height=True) as app:
 
     with gr.Row():
         with gr.Column(scale=1):
+            map_type_radio = gr.Radio(
+                choices=[
+                    ("Street", "carto-voyager"),
+                    ("Satellite", "satellite-streets"),
+                ],
+                value="carto-voyager",
+                label="Map View",
+            )
+            clear_selection_button = gr.Button("Reset Map")
             start_year_dropdown = gr.Dropdown(
                 choices=["2016", "2017", "2018", "2019"],
                 value="2019",
@@ -205,7 +214,6 @@ with gr.Blocks(fill_height=True) as app:
                 value="2020",
                 label="End Year Selection",
             )
-            clear_selection_button = gr.Button("Reset Map")
 
             gr.Markdown("### 📊 Performance Metrics")
             metrics_box = gr.Markdown(value="*Loading metrics...*")
@@ -223,26 +231,16 @@ with gr.Blocks(fill_height=True) as app:
         * Model relies on historical trends and cannot predict external shocks or abrupt policy shifts.
         """)
 
-    start_year_dropdown.change(
-        fn=update_dashboard,
-        inputs=[start_year_dropdown, end_year_dropdown],
-        outputs=[map_output, metrics_box],
-    )
-    end_year_dropdown.change(
-        fn=update_dashboard,
-        inputs=[start_year_dropdown, end_year_dropdown],
-        outputs=[map_output, metrics_box],
-    )
-    clear_selection_button.click(
-        fn=update_dashboard,
-        inputs=[start_year_dropdown, end_year_dropdown],
-        outputs=[map_output, metrics_box],
-    )
-    app.load(
-        fn=update_dashboard,
-        inputs=[start_year_dropdown, end_year_dropdown],
-        outputs=[map_output, metrics_box],
-    )
+    update_args = {
+        "fn": update_dashboard,
+        "inputs": [start_year_dropdown, end_year_dropdown, map_type_radio],
+        "outputs": [map_output, metrics_box],
+    }
+    map_type_radio.change(**update_args)
+    start_year_dropdown.change(**update_args)
+    end_year_dropdown.change(**update_args)
+    clear_selection_button.click(**update_args)
+    app.load(**update_args)
 
 # TODO: remove if unused
 # css = """
