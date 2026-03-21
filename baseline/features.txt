@@ -1,0 +1,108 @@
+    B2,B3,B4,B8 -> 10m resolution
+    B5, B6, B7, B8A, B11, B12 -> 20m resolution
+    B1, B9 -> 60m resolution
+
+01. NDVI(vegetation)
+It detetcts the vegetation health
+
+NDVI = (B8 - B4) / (B8 + B4)
+
+Here,
+-High NDVI → vegetation
+-Low NDVI → buildings, soil, water
+
+Here the NDVI values defines the type of vegetation in the grid
+~0.6–1	-->     Dense vegetation
+~0.2–0.5 -->	Grass / sparse veg
+~0–0.2 -->	    Built-up / soil
+< 0	-->         Water
+
+
+
+
+02. NDBI(Built-up Index)
+
+NDBI = (B11 - B8) / (B11 + B8)
+
+- B11 - 20m resolution - Reflects built-up areas
+- B8 - 10m resolution  - Vegetation reflection
+
+- Resample B11 from 20m to 10m
+
+Here,
+- High NDBI → urban
+- Low NDBI → vegetation
+
+Helps detect:
+- urban expansion
+- densification
+
+
+03. NDWI (Water Index)
+
+NDWI = (B3 - B8) / (B3 + B8)
+
+Both bands are 10m resolution
+
+Here,
+- High NDWI → water
+
+
+04. SAVI (Soil Adjusted Vegetation Index)
+
+SAVI = ((B8 - B4) / (B8 + B4 + L) ) * (1 + L)
+
+- Where L is soil adjustment factor/ stabilization factor (hyperparameter)
+- L = 0.5
+
+- B8 and B4 both are 10m resolution bands
+
+Here,
+SAVI reduces the soil brightness effect because NDVI says its vegetation or not
+
+- High L --> more soil correction 
+- Low L --> closer to NDVI
+
+SAVI value	-->     Meaning
+~0.6–1	    -->     dense vegetation
+~0.2–0.5	-->     sparse vegetation
+~0–0.2	    -->     bare soil / built-up
+< 0	        -->     water
+
+Helps in urban + vegetation change
+
+
+
+
+05. delta_ndvi(change b/w 2020 and 2021 or more)
+
+delta_ndvi = ndvi_2021 - ndvi_2020
+
+Value	    -->     Meaning
+~Positive	-->     vegetation increased
+~Negative	-->     vegetation decreased
+~ 0         -->	    stable
+
+
+
+
+06. delta_ndbi(change in built-up intensity b/w 2020 and 2021 or more)
+
+delta_ndbi = ndbi_2021 - ndbi_2020
+
+Value	    -->     Meaning
+~Positive	-->     vegetation increased
+~Negative	-->     vegetation decreased
+~ 0         -->	    stable
+
+
+
+
+07. delta_ndwi(change in water/moisture b/w 2020 and 2021 or more)
+
+delta_ndwi = ndwi_2021 - ndwi_2020
+
+Value	    -->     Meaning
+~Positive	-->     vegetation increased
+~Negative	-->     vegetation decreased
+~ 0         -->	    stable
