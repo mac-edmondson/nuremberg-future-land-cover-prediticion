@@ -2,42 +2,24 @@ import json
 
 import geopandas as gpd
 import gradio as gr
-import h3
 import numpy as np
 import pandas as pd
 import plotly.express as px
-from shapely.geometry import shape
+from shapely.geometry import box, shape
 
-# --- Real Hexagon Data Generation (Nuremberg) ---
 lat_center = 49.4521
 lon_center = 11.0767
-resolution = 10  # Resolution 8 is perfect for neighborhood-level city data
 
-# H3 Version 4.x
-center_hex = h3.latlng_to_cell(lat_center, lon_center, resolution)
-hexes = list(h3.grid_disk(center_hex, 40))  # Radius of 7 hexes
+class_cols = [
+    "tree_cover",
+    "built_up",
+    "grassland",
+    "cropland",
+    "bare_sparse_vegetation",
+    "water",
+]
 
-
-# We manually flip the (lat, lon) tuples to (lon, lat) for GeoJSON
-def get_boundary(h):
-    return [coord[::-1] for coord in h3.cell_to_boundary(h)]
-
-
-# Build the GeoJSON dictionary required by Plotly to draw polygons
-geojson = {"type": "FeatureCollection", "features": []}
-for h in hexes:
-    coords = list(get_boundary(h))
-    coords.append(coords[0])  # GeoJSON requires the polygon loop to be closed
-
-    feature = {
-        "type": "Feature",
-        "id": h,
-        "geometry": {"type": "Polygon", "coordinates": [coords]},
-        "properties": {"hex_id": h},
-    }
-    geojson["features"].append(feature)
-
-base_df = pd.DataFrame({"Hexagon_ID": hexes})
+display_cell_size_m = 200
 
 # 1. Load your CSV data
 # Replace 'your_data.csv' and 'polygon_column' with your actual file and column names
@@ -48,7 +30,34 @@ df = pd.read_csv("data.csv")
 df["geometry"] = df[".geo"].apply(lambda x: shape(json.loads(x)))
 
 # 3. Create a GeoDataFrame and explicitly tell it the current format is EPSG:3857 (meters)
-gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:3857")
+gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:32632")
+
+# Aggregate 20x20m cells into 200x200m display cells.
+# x and y are cell-center coordinates in EPSG:32632.
+gdf["grid_x"] = (np.floor(gdf["x"] / display_cell_size_m) * display_cell_size_m).astype(
+    int
+)
+gdf["grid_y"] = (np.floor(gdf["y"] / display_cell_size_m) * display_cell_size_m).astype(
+    int
+)
+
+agg_df = (
+    gdf.groupby(["grid_x", "grid_y"], as_index=False)
+    .agg({**{column: "mean" for column in class_cols}, "cell_id": "count"})
+    .rename(columns={"cell_id": "cell_count"})
+)
+
+agg_df["geometry"] = agg_df.apply(
+    lambda row: box(
+        row["grid_x"],
+        row["grid_y"],
+        row["grid_x"] + display_cell_size_m,
+        row["grid_y"] + display_cell_size_m,
+    ),
+    axis=1,
+)
+
+gdf = gpd.GeoDataFrame(agg_df, geometry="geometry", crs="EPSG:32632")
 
 # 4. CRITICAL STEP: Reproject the coordinates to EPSG:4326 (Latitude/Longitude)
 gdf = gdf.to_crs("EPSG:4326")
@@ -64,28 +73,18 @@ plotly_geojson = json.loads(gdf.geometry.to_json())
 def map_class_to_string(cls: int):
     try:
         match int(cls):
-            case 10:
+            case 0:
                 return "Tree Cover"
-            case 20:
-                return "Shrubland"
-            case 30:
-                return "Grassland"
-            case 40:
-                return "Cropland"
-            case 50:
+            case 1:
                 return "Built-up"
-            case 60:
+            case 2:
+                return "Grassland"
+            case 3:
+                return "Cropland"
+            case 4:
                 return "Bare / Sparse veg."
-            case 70:
-                return "Snow and Ice"
-            case 80:
+            case 5:
                 return "Permanent Water"
-            case 90:
-                return "Herbaceous wetland"
-            case 95:
-                return "Mangroves"
-            case 100:
-                return "Moss and Lichen"
             case _:
                 return "unclassified"
     except ValueError:
@@ -114,7 +113,8 @@ def update_dashboard(start_year, end_year, map_type):
 
     # Mock the Machine Learning Output
     df = gdf.copy()
-    df["Dominant Class"] = df["label"].apply(map_class_to_string)
+    df["Dominant Class"] = np.argmax(df[class_cols].to_numpy(), axis=1)
+    df["Dominant Class"] = df["Dominant Class"].apply(map_class_to_string)
     df["Confidence"] = np.random.choice(
         ["High", "Medium", "Low"], size=len(df), p=[0.6, 0.3, 0.1]
     )
@@ -127,7 +127,17 @@ def update_dashboard(start_year, end_year, map_type):
         color="Dominant Class",
         color_discrete_map=color_map,
         hover_name="Hexagon_ID",
-        hover_data={"Hexagon_ID": False, "Dominant Class": True, "Confidence": True},
+        hover_data={
+            "Hexagon_ID": False,
+            "Dominant Class": True,
+            "cell_count": True,
+            "tree_cover": True,
+            "built_up": True,
+            "grassland": True,
+            "cropland": True,
+            "bare_sparse_vegetation": True,
+            "water": True,
+        },
         zoom=11,
         center={"lat": lat_center, "lon": lon_center},
         map_style=map_type,
