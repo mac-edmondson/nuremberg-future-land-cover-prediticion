@@ -1,0 +1,32 @@
+Benchmark All Models Except MLP Cuase it's better
+--- Linear Regression ---
+Train R2: 0.5228 | Test R2: 0.4755
+Train RMSE: 0.2055 | Test RMSE: 0.2192
+
+--- Ridge Regression ---
+Train R2: 0.5205 | Test R2: 0.4723
+Train RMSE: 0.2061 | Test RMSE: 0.2199
+
+--- Lasso Regression ---
+Train R2: 0.2142 | Test R2: 0.2221
+Train RMSE: 0.2582 | Test RMSE: 0.2586
+
+--- KNN ---
+Train R2: 0.8810 | Test R2: 0.6944
+Train RMSE: 0.1067 | Test RMSE: 0.1732
+
+--- Random Forest ---
+Train R2: 0.7727 | Test R2: 0.6904
+Train RMSE: 0.1457 | Test RMSE: 0.1750
+
+--- XGBoost ---
+Train R2: 0.8165 | Test R2: 0.7419
+Train RMSE: 0.1298 | Test RMSE: 0.1604
+
+--- Gradient Boosting ---
+Train R2: 0.8009 | Test R2: 0.7271
+Train RMSE: 0.1373 | Test RMSE: 0.1654
+
+24 mins Run time on Joswins Computer
+
+Overall Dominant Class Accuracy: 0.8471 -> XGBoost(Best Model in the run)

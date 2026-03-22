@@ -1,0 +1,46 @@
+Benchmark Over These three models
+Training time : approx 30 mins (Joswin)
+Overall Dominant Class Accuracy: 0.9031 (XGBoost)   --> to be changed
+
+--- Random Forest ---
+Train R2: 0.8621 | Test R2: 0.7972
+Train RMSE: 0.1253 | Test RMSE: 0.1581
+
+--- XGBoost ---
+Train R2: 0.8748 | Test R2: 0.8114
+Train RMSE: 0.1144 | Test RMSE: 0.1505
+
+--- MLP Regressor ---
+Train R2: 0.8857 | Test R2: 0.8273
+Train RMSE: 0.1126 | Test RMSE: 0.1436
+
+---------------------------------------------------------------
+
+--- Linear Regression ---
+Train R2: 0.6439 | Test R2: 0.6075
+Train RMSE: 0.1836 | Test RMSE: 0.1995
+
+--- Ridge Regression ---
+Train R2: 0.6430 | Test R2: 0.6054
+Train RMSE: 0.1838 | Test RMSE: 0.1998
+
+--- Lasso Regression ---
+Train R2: 0.3879 | Test R2: 0.3821
+Train RMSE: 0.2211 | Test RMSE: 0.2286
+
+--- KNN ---
+Train R2: 0.9235 | Test R2: 0.8117
+Train RMSE: 0.0935 | Test RMSE: 0.1522
+
+--- Random Forest ---
+Train R2: 0.8621 | Test R2: 0.7972
+Train RMSE: 0.1253 | Test RMSE: 0.1581
+
+--- XGBoost ---
+Train R2: 0.8748 | Test R2: 0.8114
+Train RMSE: 0.1144 | Test RMSE: 0.1505
+
+--- Gradient Boosting ---
+Train R2: 0.8762 | Test R2: 0.8091
+Train RMSE: 0.1199 | Test RMSE: 0.1533
+
