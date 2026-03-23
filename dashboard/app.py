@@ -9,67 +9,40 @@ import pandas as pd
 import plotly.express as px
 from shapely.geometry import box, shape
 
-lat_center = 49.4521
+lat_center = 49.4330
 lon_center = 11.0767
 
 class_cols = [
     "built_up",
-    "tree_cover",
-    "grassland",
-    "cropland",
+    "vegetation",
     "water",
 ]
 
-display_cell_size_m = 200
 
-
-def load_data_from_csv(csv_path="data.csv", cell_size_m=display_cell_size_m):
-    # 1. Load CSV data
+def load_data_from_csv(csv_path="data.csv"):
+    # 1. Load CSV data at full resolution (no aggregation)
     df = pd.read_csv(csv_path)
 
     # 2. Parse geometry from GeoJSON strings
-    df["geometry"] = df[".geo"].apply(lambda x: shape(json.loads(x)))
+    df["geometry"] = pd.Series(
+        [shape(json.loads(x)) for x in df[".geo"]],
+        index=df.index,
+        dtype="object",
+    )
 
     # 3. Build GeoDataFrame in projected CRS (meters)
     gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:32632")
 
-    # Aggregate 20x20m cells into larger display cells.
-    gdf["grid_x"] = (np.floor(gdf["x"] / cell_size_m) * cell_size_m).astype(int)
-    gdf["grid_y"] = (np.floor(gdf["y"] / cell_size_m) * cell_size_m).astype(int)
-
-    # agg_df = (
-    #     gdf.groupby(["grid_x", "grid_y"], as_index=False)
-    #     .agg({**{column: "mean" for column in class_cols}, "cell_id": "count"})
-    #     .rename(columns={"cell_id": "cell_count"})
-    # )
-
-    numeric_columns = gdf.select_dtypes(include=[np.number]).columns.tolist()
-    agg_columns = {
-        column: "mean"
-        for column in numeric_columns
-        if column not in {"grid_x", "grid_y"}
-    }
-    agg_df = gdf.groupby(["delta_years", "grid_x", "grid_y"], as_index=False).agg(
-        agg_columns
-    )
-
-    agg_df["geometry"] = agg_df.apply(
-        lambda row: box(
-            row["grid_x"],
-            row["grid_y"],
-            row["grid_x"] + cell_size_m,
-            row["grid_y"] + cell_size_m,
-        ),
-        axis=1,
-    )
-
-    gdf = gpd.GeoDataFrame(agg_df, geometry="geometry", crs="EPSG:32632")
-
-    # 4. Reproject to latitude/longitude
+    # 4. Create unique IDs and centroids for rendering (before CRS conversion for accuracy)
+    gdf["grid_id"] = gdf.index
+    centroids = gdf.geometry.centroid
     gdf = gdf.to_crs("EPSG:4326")
+    centroids = centroids.to_crs("EPSG:4326")
+    gdf["lon"] = centroids.x
+    gdf["lat"] = centroids.y
 
-    # 5. Create unique IDs for Plotly linking
-    gdf["Hexagon_ID"] = gdf.index
+    # Add vegetation target label
+    gdf["vegetation"] = gdf[["tree_cover", "cropland", "grassland"]].sum(axis=1)
 
     # Add engineered features
     gdf["NDVI"] = (gdf["B8"] - gdf["B4"]) / (gdf["B8"] + gdf["B4"] + 1e-8)
@@ -81,33 +54,46 @@ def load_data_from_csv(csv_path="data.csv", cell_size_m=display_cell_size_m):
     gdf["NDWI"] = (gdf["B3"] - gdf["B8"]) / (gdf["B3"] + gdf["B8"] + 1e-8)
     gdf["MNDWI"] = (gdf["B3"] - gdf["B11"]) / (gdf["B3"] + gdf["B11"] + 1e-8)
 
-    # 6. Convert to GeoJSON format expected by Plotly
-    plotly_geojson = json.loads(gdf.geometry.to_json())
-    return gdf, plotly_geojson
+    return gdf
 
 
 def map_class_to_string(cls: int):
     try:
-        match int(cls):
-            case 0:
-                return "Tree Cover"
-            case 1:
-                return "Built-up"
-            case 2:
-                return "Grassland"
-            case 3:
-                return "Cropland"
-            case 4:
-                return "Bare / Sparse veg."
-            case 5:
-                return "Permanent Water"
-            case _:
-                return "unclassified"
-    except ValueError:
+        return str.join(" ", class_cols[cls].lower().split("_")).title()
+    except IndexError:
         return "unclassified"
 
 
-def load_prediction_model(model_path="artifacts/xgboost_multioutput.pkl"):
+def assign_group_dominant_class(
+    df: pd.DataFrame,
+    class_columns: list[str],
+    group_columns: tuple[str, str] = ("grid_x", "grid_y"),
+) -> pd.DataFrame:
+    """Assign one dominant class per grid group based on summed class scores."""
+    missing_cols = [
+        col for col in [*group_columns, *class_columns] if col not in df.columns
+    ]
+    if missing_cols:
+        raise ValueError(
+            f"Missing required columns for dominant class assignment: {missing_cols}"
+        )
+
+    grouped_scores = df.groupby(list(group_columns), dropna=False)[class_columns].sum()
+    print(f"{len(grouped_scores)=} {len(df)=}")
+    dominant_idx = np.argmax(grouped_scores.to_numpy(), axis=1)
+
+    dominant_per_group = grouped_scores.reset_index()[list(group_columns)]
+    dominant_per_group["Dominant Class"] = [
+        map_class_to_string(idx) for idx in dominant_idx
+    ]
+
+    df_out = df.drop(columns=["Dominant Class"], errors="ignore").merge(
+        dominant_per_group, on=list(group_columns), how="left"
+    )
+    return df_out
+
+
+def load_prediction_model(model_path="artifacts/XGBoost_delta.pkl"):
     model_file = Path(model_path)
     if not model_file.exists():
         return None
@@ -116,18 +102,28 @@ def load_prediction_model(model_path="artifacts/xgboost_multioutput.pkl"):
         return pickle.load(f)
 
 
-gdf, plotly_geojson = load_data_from_csv("data_3x3/delta_table_2021_3x3.csv")
 prediction_model = load_prediction_model()
+
+try:
+    gdf = load_data_from_csv("data_3x3/delta_table_2021_3x3.csv")
+except Exception as e:
+    print(f"Error loading data: {e}")
+    import traceback
+
+    traceback.print_exc()
+    gdf = None
 
 
 color_map = {
     "Tree Cover": "#006400",
+    "Vegetation": "#006400",
     "Shrubland": "#ffbb22",
     "Grassland": "#ffff4c",
     "Cropland": "#f096ff",
-    "Built-up": "#fa0000",
+    "Built Up": "#fa0000",
     "Bare / Sparse veg.": "#b4b4b4",
     "Snow and Ice": "#f0f0f0",
+    "Water": "#0064ff",
     "Permanent Water": "#0064ff",
     "Herbaceous wetland": "#0096a0",
     "Mangroves": "#00cf75",
@@ -136,10 +132,14 @@ color_map = {
 }
 
 
-def update_dashboard(start_year, time_delta, map_type):
+def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_size):
     """Build two maps: selected year (delta=0) and future (delta=time_delta)."""
+    if gdf is None:
+        return None, None
+
     start_year = int(start_year)
     time_delta = int(time_delta)
+    grid_cell_size = int(grid_cell_size)
     np.random.seed(start_year)
 
     # Select the rows from the selected data
@@ -148,6 +148,36 @@ def update_dashboard(start_year, time_delta, map_type):
     delta_selection = 2021 - start_year
 
     base_df = gdf[gdf["delta_years"].astype(int) == delta_selection].copy()
+
+    # Calculate grid coordinates once for all aggregations
+    base_df["grid_x"] = (
+        np.floor(base_df["x"] / grid_cell_size) * grid_cell_size
+    ).astype(int)
+    base_df["grid_y"] = (
+        np.floor(base_df["y"] / grid_cell_size) * grid_cell_size
+    ).astype(int)
+
+    # Generate GeoJSON for choropleth at this grid cell size
+    grid_metadata = (
+        base_df[["delta_years", "grid_x", "grid_y"]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+    grid_metadata["grid_id"] = np.arange(len(grid_metadata), dtype=int)
+    grid_metadata["geometry"] = grid_metadata.apply(
+        lambda row: box(
+            row["grid_x"],
+            row["grid_y"],
+            row["grid_x"] + grid_cell_size,
+            row["grid_y"] + grid_cell_size,
+        ),
+        axis=1,
+    )
+    display_grid_gdf = gpd.GeoDataFrame(
+        grid_metadata, geometry="geometry", crs="EPSG:32632"
+    )
+    display_grid_gdf = display_grid_gdf.to_crs("EPSG:4326")
+    plotly_geojson = json.loads(display_grid_gdf.to_json())
 
     feature_names = None
     if prediction_model is not None:
@@ -181,35 +211,73 @@ def update_dashboard(start_year, time_delta, map_type):
         else:
             print(f"Skipping Prediction: {prediction_model=}; {feature_names=}")
 
-        df_out["Dominant Class"] = np.argmax(df_out[class_cols].to_numpy(), axis=1)
-        df_out["Dominant Class"] = df_out["Dominant Class"].apply(map_class_to_string)
+        df_out = assign_group_dominant_class(df_out, class_cols)
         df_out["Confidence"] = np.random.choice(
             ["High", "Medium", "Low"], size=len(df_out), p=[0.6, 0.3, 0.1]
         )
         return df_out
 
     def build_map(df_in: pd.DataFrame):
-        fig = px.choropleth_map(
-            df_in,
-            geojson=plotly_geojson,
-            locations="Hexagon_ID",
-            color="Dominant Class",
-            color_discrete_map=color_map,
-            hover_name="Hexagon_ID",
-            hover_data={
-                "Hexagon_ID": False,
-                "Dominant Class": True,
-                "tree_cover": True,
-                "built_up": True,
-                "grassland": True,
-                "cropland": True,
-                "bare_sparse_vegetation": True,
-                "water": True,
-            },
-            zoom=11,
-            center={"lat": lat_center, "lon": lon_center},
-            map_style=map_type,
+        # Aggregate per grid cell using pre-computed grid coordinates
+        agg_dict = {
+            "Dominant Class": "first",
+            "built_up": "mean",
+            "vegetation": "mean",
+            "water": "mean",
+            "lat": "mean",  # Average lat/lon for representative point
+            "lon": "mean",
+        }
+        grid_df = df_in.groupby(["grid_x", "grid_y"], as_index=False).agg(agg_dict)
+        grid_df = grid_df.merge(
+            grid_metadata[["grid_x", "grid_y", "grid_id"]],
+            on=["grid_x", "grid_y"],
+            how="left",
+            validate="one_to_one",
         )
+
+        if render_mode == "points":
+            # Scatter map with aggregated points at grid cell resolution
+            fig = px.scatter_map(
+                grid_df,
+                lat="lat",
+                lon="lon",
+                color="Dominant Class",
+                color_discrete_map=color_map,
+                hover_name="grid_id",
+                hover_data={
+                    "grid_id": False,
+                    "Dominant Class": True,
+                    "built_up": True,
+                    "vegetation": True,
+                    "water": True,
+                    "lat": False,
+                    "lon": False,
+                },
+                zoom=11,
+                center={"lat": lat_center, "lon": lon_center},
+                map_style=map_type,
+            )
+        else:
+            # Choropleth map with polygon grid cells
+            fig = px.choropleth_map(
+                grid_df,
+                geojson=plotly_geojson,
+                locations="grid_id",
+                featureidkey="properties.grid_id",
+                color="Dominant Class",
+                color_discrete_map=color_map,
+                hover_name="grid_id",
+                hover_data={
+                    "grid_id": False,
+                    "Dominant Class": True,
+                    "built_up": True,
+                    "vegetation": True,
+                    "water": True,
+                },
+                zoom=11,
+                center={"lat": lat_center, "lon": lon_center},
+                map_style=map_type,
+            )
         fig.update_layout(
             coloraxis_showscale=False,
             legend=dict(
@@ -231,14 +299,29 @@ def update_dashboard(start_year, time_delta, map_type):
             ),
             height=700,
         )
-        fig.update_traces(
-            marker=dict(opacity=0.2),
-            selected=dict(marker=dict(opacity=0.8)),
-            unselected=dict(marker=dict(opacity=0.0)),
-        )
+        if render_mode == "points":
+            fig.update_traces(
+                marker=dict(size=7, opacity=0.55),
+                selected=dict(marker=dict(opacity=0.9)),
+                unselected=dict(marker=dict(opacity=0.1)),
+            )
+        else:
+            fig.update_traces(
+                marker=dict(opacity=0.2),
+                selected=dict(marker=dict(opacity=0.8)),
+                unselected=dict(marker=dict(opacity=0.0)),
+            )
         return fig
 
-    predicted_dfs = [build_predicted_df(prediction_delta=d) for d in [0, time_delta]]
+    if delta_selection == 0:
+        predicted_dfs = [
+            assign_group_dominant_class(base_df.copy(), class_cols),
+            build_predicted_df(prediction_delta=time_delta),
+        ]
+    else:
+        predicted_dfs = [
+            build_predicted_df(prediction_delta=d) for d in [0, time_delta]
+        ]
     selected_fig, future_fig = [build_map(df_item) for df_item in predicted_dfs]
 
     # # 3. Mock the Evaluation Metrics
@@ -273,10 +356,10 @@ def update_dashboard(start_year, time_delta, map_type):
         differing_rows = pd.concat(
             [
                 selected_pred_df.loc[
-                    diff_mask, ["Hexagon_ID", "Dominant Class", *class_cols]
+                    diff_mask, ["grid_id", "Dominant Class", *class_cols]
                 ].add_suffix("_selected"),
                 future_pred_df.loc[
-                    diff_mask, ["Hexagon_ID", "Dominant Class", *class_cols]
+                    diff_mask, ["grid_id", "Dominant Class", *class_cols]
                 ].add_suffix("_future"),
             ],
             axis=1,
@@ -304,16 +387,30 @@ with gr.Blocks(fill_height=True) as app:
             value="carto-voyager",
             label="Map View",
         )
+        render_mode_radio = gr.Radio(
+            choices=[
+                ("Fast (Points)", "points"),
+                ("Detailed (Polygons)", "polygons"),
+            ],
+            value="points",
+            label="Render Mode",
+        )
+        grid_cell_size_dropdown = gr.Dropdown(
+            choices=[20, 40, 60, 80, 100, 120, 140, 160, 180, 200],
+            value=100,
+            label="Grid Cell Size (m)",
+        )
         start_year_dropdown = gr.Dropdown(
             choices=[2016, 2017, 2018, 2019, 2020, 2021],
-            value=2019,
+            value=2021,
             label="Start Year Selection",
         )
         time_delta_drop_down = gr.Dropdown(
             choices=[i for i in range(0, 5)],
-            value=1,
+            value=0,
             label="Future Time (Years)",
         )
+        submit_button = gr.Button("Submit", variant="primary")
 
     # TODO: Remove if unused
     # with gr.Row():
@@ -343,14 +440,18 @@ with gr.Blocks(fill_height=True) as app:
 
     update_args = {
         "fn": update_dashboard,
-        "inputs": [start_year_dropdown, time_delta_drop_down, map_type_radio],
+        "inputs": [
+            start_year_dropdown,
+            time_delta_drop_down,
+            map_type_radio,
+            render_mode_radio,
+            grid_cell_size_dropdown,
+        ],
         "outputs": [map_output_left, map_output_right],
     }
-    map_type_radio.change(**update_args)
-    start_year_dropdown.change(**update_args)
-    time_delta_drop_down.change(**update_args)
+    submit_button.click(**update_args)
     # clear_selection_button.click(**update_args)
-    app.load(**update_args)
+    # app.load(**update_args)
 
 # TODO: remove if unused
 # css = """
@@ -363,4 +464,4 @@ with gr.Blocks(fill_height=True) as app:
 # """
 
 if __name__ == "__main__":
-    app.launch(theme=gr.themes.Monochrome())
+    app.launch()
