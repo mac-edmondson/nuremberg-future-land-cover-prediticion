@@ -76,7 +76,7 @@ The primary input consists of multi-spectral Sentinel-2 imagery (bands B1–B12)
 
 ### Model Training and Optimization
 The framework evaluates a progression of predictive models, from linear baselines to complex nonlinear ensembles.
-* **Feature Engineering**: The models utilize spectral indices (NDVI, NDWI, SAVI, EVI2, MNDWI) designed to enhance specific land surface characteristics like vegetation and built-up areas. 
+* **Feature Engineering**: The models utilize spectral indices (NDVI, NDWI, SAVI, EVI2, MNDWI) designed to enhance specific land surface characteristics like vegetation and built-up areas.
 * **Neighborhood Context**: Local spatial dependencies are captured by augmenting each grid cell with spectral values from its neighboring cells.
 * **Hyperparameter Tuning**: Optimization was performed using Optuna, a Bayesian optimization framework, to identify high-performing configurations for KNN, Random Forest, and XGBoost.
 * **Stacking Ensemble**: The final system employs a Stacking Regressor using XGBoost, Random Forest, and KNN as base learners, with Linear Regression as the final estimator. This model achieved a test $R^{2}$ of 0.8882 and an F1-score of 0.9320
@@ -87,7 +87,7 @@ The framework evaluates a progression of predictive models, from linear baseline
 * **Interpretability (SHAP)**: Analysis using SHAP values confirmed that vegetation-related indices (EVI2, SAVI) are the most influential features. For the built-up class, the temporal "delta years" feature and neighboring spectral bands (B4 and B8) play significant roles in capturing urban expansion.
 
 ### Code and Reproducibility
-The proposed pipeline is implemented in Python using scikit-learn and XGBoost, with data processing performed via Google Earth Engine. Experiments follow a temporal hold-out strategy with fixed random seeds to ensure reproducibility. All model configurations and feature engineering steps are deterministic and documented. 
+The proposed pipeline is implemented in Python using scikit-learn and XGBoost, with data processing performed via Google Earth Engine. Experiments follow a temporal hold-out strategy with fixed random seeds to ensure reproducibility. All model configurations and feature engineering steps are deterministic and documented.
 
 **Datasets, Trained model artifacts, and supporting resources** : The data is publicly available on [Google Drive](https://drive.google.com/drive/u/3/folders/10M3mDetJYfQdM5GE7GPRY6Q_9u-eyJZJ).
 
@@ -95,7 +95,8 @@ See the notebooks in the below linked directories which can be used to reproduce
 
 * [**Data Extraction and Aggregation**](data_extraction)
 * [**Baseline Model Training & Basic Analysis**](baseline)
-* [**Final Model Training & Hyperparameter Optimization**](hyperparam_tuning)
+* [**Model Hyperparameter Optimization**](hyperparam_tuning)
+* [**Final Model Training & Pickling**](baseline)
 * [**Final Model(s) Post-hoc Analysis**](analysis)
 
 ### Acknowledgements
