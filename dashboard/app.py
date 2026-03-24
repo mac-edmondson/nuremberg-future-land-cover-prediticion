@@ -1214,10 +1214,6 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         build_map(df_item) for df_item in predicted_dfs
     ]
 
-    # Ensure fresh submits never inherit prior browser-side selection masks.
-    selected_fig.update_traces(selectedpoints=None)
-    future_fig.update_traces(selectedpoints=None)
-
     global \
         LAST_GRID_TABLES, \
         LAST_SUBGRID_TABLES, \
