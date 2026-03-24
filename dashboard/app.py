@@ -1,3 +1,10 @@
+"""Interactive Gradio dashboard for land-cover comparison and prediction in Nuremberg.
+
+This module loads geospatial grid data, prepares model-based future predictions,
+renders two synchronized interactive maps, and provides selection-driven insight
+plots for land-cover composition changes.
+"""
+
 import json
 import pickle
 import time
@@ -99,6 +106,14 @@ SELECTION_EVENT_GUARD_MS = 900
 
 
 def build_empty_borough_change_plot(message: str) -> go.Figure:
+    """Create a placeholder figure for borough-level change output.
+
+    Args:
+        message: Centered message shown when borough insights are unavailable.
+
+    Returns:
+        A Plotly figure with fixed layout and a descriptive annotation.
+    """
     fig = go.Figure()
     fig.update_layout(
         title="Borough Change Overview",
@@ -120,6 +135,15 @@ def build_empty_borough_change_plot(message: str) -> go.Figure:
 
 
 def build_empty_pie(title: str, message: str) -> go.Figure:
+    """Create an empty pie-chart placeholder with a custom title and message.
+
+    Args:
+        title: Figure title for the placeholder panel.
+        message: Centered message shown in the panel body.
+
+    Returns:
+        A Plotly figure configured as a placeholder state.
+    """
     fig = go.Figure()
     fig.update_layout(
         title=title,
@@ -141,6 +165,15 @@ def build_empty_pie(title: str, message: str) -> go.Figure:
 
 
 def build_empty_delta(title: str, message: str) -> go.Figure:
+    """Create an empty delta-chart placeholder with axes and status text.
+
+    Args:
+        title: Figure title for the placeholder panel.
+        message: Centered message shown when delta data is unavailable.
+
+    Returns:
+        A Plotly bar-chart layout with a centered status annotation.
+    """
     fig = go.Figure()
     fig.update_layout(
         title=title,
@@ -224,10 +257,11 @@ BOROUGH_BOUNDARIES_GDF = load_nuremberg_borough_boundaries()
 
 
 def calculate_borough_bounds() -> dict[str, dict]:
-    """Calculate lat/lon bounds for each borough from BOROUGH_BOUNDARIES_GDF.
+    """Calculate map bounds and zoom hints for each known borough polygon.
 
     Returns:
-        Dictionary mapping borough names to {min_lat, max_lat, min_lon, max_lon, center_lat, center_lon, zoom}
+        Dictionary mapping borough names to
+        {min_lat, max_lat, min_lon, max_lon, center_lat, center_lon, zoom}.
     """
     bounds = {}
     if BOROUGH_BOUNDARIES_GDF is None or BOROUGH_BOUNDARIES_GDF.empty:
@@ -266,6 +300,20 @@ def build_top_changed_boroughs_chart(
     selected_subgrid_df: pd.DataFrame,
     future_subgrid_df: pd.DataFrame,
 ) -> go.Figure:
+    """Build a stacked chart of positive land-cover composition change by borough.
+
+    The chart compares selected-year and future composition percentages per borough,
+    keeps only positive deltas per class, and stacks class contributions for all
+    ten expected boroughs.
+
+    Args:
+        selected_subgrid_df: Sub-grid table for the selected year.
+        future_subgrid_df: Sub-grid table for the future prediction.
+
+    Returns:
+        A Plotly figure containing stacked positive deltas by borough or an
+        explanatory placeholder if required inputs are missing.
+    """
     if selected_subgrid_df.empty or future_subgrid_df.empty:
         return build_empty_borough_change_plot("No grid data available yet.")
 
@@ -274,6 +322,7 @@ def build_top_changed_boroughs_chart(
         return build_empty_borough_change_plot("Borough boundaries are not available.")
 
     def attach_boroughs_to_subgrid(grid_df: pd.DataFrame) -> pd.DataFrame:
+        """Attach borough names to sub-grid rows via point-in-polygon join."""
         points_gdf = gpd.GeoDataFrame(
             grid_df[["lat", "lon", *class_cols]].copy(),
             geometry=gpd.points_from_xy(grid_df["lon"], grid_df["lat"]),
@@ -414,6 +463,17 @@ class PlotSelectionBridge(gr.HTML):
         label: str | None = None,
         **kwargs,
     ):
+        """Initialize the bridge component and embed JavaScript event wiring.
+
+        Args:
+            left_plot_id: DOM element id of the selected-year map container.
+            right_plot_id: DOM element id of the future map container.
+            borough_plot_id: Optional DOM id of the borough chart container.
+            borough_bounds: Optional borough metadata used for click-to-zoom.
+            value: Initial payload value exposed by the component.
+            label: Optional Gradio label.
+            **kwargs: Additional keyword arguments forwarded to ``gr.HTML``.
+        """
         html_template = """
         <div class="selection-bridge" style="padding: 8px 12px; border: 1px solid #d8dee4; border-radius: 8px; margin-top: 8px;">
             <div style="font-size: 0.9rem; color: #24292f;">
@@ -793,6 +853,7 @@ class PlotSelectionBridge(gr.HTML):
         )
 
     def api_info(self):
+        """Describe the payload schema emitted by this custom component."""
         return {
             "type": "object",
             "description": "Selection payload with source, event_kind, and grid_ids.",
@@ -800,20 +861,29 @@ class PlotSelectionBridge(gr.HTML):
 
 
 def load_data_from_csv(data_path):
-    # 1. Load CSV data at full resolution (no aggregation)
+    """Load geospatial training/inference data and derive model-ready features.
+
+    Args:
+        data_path: Path to the parquet dataset that includes geometry and bands.
+
+    Returns:
+        GeoDataFrame in EPSG:4326 with centroids, vegetation target, and spectral
+        index features.
+    """
+    # Load parquet data at full row-level detail.
     df = pd.read_parquet(data_path)
 
-    # 2. Parse geometry from GeoJSON strings
+    # Parse per-row GeoJSON geometry payloads into shapely objects.
     df["geometry"] = pd.Series(
         [shape(json.loads(x)) for x in df[".geo"]],
         index=df.index,
         dtype="object",
     )
 
-    # 3. Build GeoDataFrame in projected CRS (meters)
+    # Keep projected metric CRS for geometry operations that depend on distance.
     gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:32632")
 
-    # 4. Create unique IDs and centroids for rendering (before CRS conversion for accuracy)
+    # Create stable ids and centroids before converting to geographic CRS.
     gdf["grid_id"] = gdf.index
     centroids = gdf.geometry.centroid
     gdf = gdf.to_crs("EPSG:4326")
@@ -821,10 +891,10 @@ def load_data_from_csv(data_path):
     gdf["lon"] = centroids.x
     gdf["lat"] = centroids.y
 
-    # Add vegetation target label
+    # Collapse vegetation-related labels into a single model target column.
     gdf["vegetation"] = gdf[["tree_cover", "cropland", "grassland"]].sum(axis=1)
 
-    # Add engineered features
+    # Derive spectral indices used by the prediction model.
     gdf["NDVI"] = (gdf["B8"] - gdf["B4"]) / (gdf["B8"] + gdf["B4"] + 1e-8)
     gdf["EVI2"] = 2.5 * (
         (gdf["B8"] - gdf["B4"]) / (gdf["B8"] + 2.4 * gdf["B4"] + 1 + 1e-8)
@@ -838,6 +908,14 @@ def load_data_from_csv(data_path):
 
 
 def map_class_to_string(cls: int):
+    """Convert class index to a human-readable label.
+
+    Args:
+        cls: Integer index into the class column list.
+
+    Returns:
+        Title-cased class label, or ``"unclassified"`` if the index is invalid.
+    """
     try:
         return str.join(" ", class_cols[cls].lower().split("_")).title()
     except IndexError:
@@ -919,6 +997,14 @@ def normalize_class_scores(
 
 
 def load_prediction_model(model_path="artifacts/XGBoost_delta.pkl"):
+    """Load the persisted prediction model if the artifact exists.
+
+    Args:
+        model_path: Relative or absolute path to the pickled model file.
+
+    Returns:
+        Deserialized model object, or ``None`` when the file is absent.
+    """
     model_file = Path(model_path)
     if not model_file.exists():
         return None
@@ -958,7 +1044,20 @@ color_map = {
 
 
 def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_size):
-    """Build two maps: selected year (delta=0) and future (delta=time_delta)."""
+    """Recompute map data, selection tables, and borough chart for the dashboard.
+
+    Args:
+        start_year: User-selected base year.
+        time_delta: Forecast horizon in years from the base year.
+        map_type: Plotly basemap style identifier.
+        render_mode: ``"points"`` or ``"polygons"`` rendering mode.
+        grid_cell_size: Parent grid size in meters for aggregation.
+
+    Returns:
+        Tuple of selected-year figure, future figure, and borough change figure.
+        If base data is unavailable, map outputs are ``None`` and the borough
+        output is an informative placeholder.
+    """
     if gdf is None:
         return (
             None,
@@ -971,14 +1070,13 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
     grid_cell_size = int(grid_cell_size)
     np.random.seed(start_year)
 
-    # Select the rows from the selected data
-    # This is a bit weird since all the data is coming from a CSV oriented
-    # around 2021, so delta of 0 is 2021, 1 is 2020, etc.
+    # Select rows matching the requested start year. The stored dataset uses
+    # year offsets where delta 0 corresponds to 2021.
     delta_selection = 2021 - start_year
 
     base_df = gdf[gdf["delta_years"].astype(int) == delta_selection].copy()
 
-    # Calculate grid coordinates once for all aggregations
+    # Compute parent-grid coordinates once and reuse them across all outputs.
     base_df["grid_x"] = (
         np.floor(base_df["x"] / grid_cell_size) * grid_cell_size
     ).astype(int)
@@ -986,7 +1084,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         np.floor(base_df["y"] / grid_cell_size) * grid_cell_size
     ).astype(int)
 
-    # Build stable grid metadata once; geometry/GeoJSON is created lazily for polygons.
+    # Build stable parent-grid metadata; polygon GeoJSON is generated lazily.
     grid_metadata = (
         base_df[["delta_years", "grid_x", "grid_y"]]
         .drop_duplicates()
@@ -996,6 +1094,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
     plotly_geojson = None
 
     def get_plotly_geojson():
+        """Lazily build and cache parent-grid GeoJSON for polygon rendering."""
         nonlocal plotly_geojson
         if plotly_geojson is None:
             grid_with_geometry = grid_metadata.copy()
@@ -1028,6 +1127,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             feature_names = prediction_model.estimators_[0].feature_names_in_.tolist()
 
     def build_predicted_df(prediction_delta: int) -> pd.DataFrame:
+        """Build a dataframe for one target delta with optional model inference."""
         df_out = base_df.copy()
         df_out["delta_years"] = prediction_delta
 
@@ -1058,6 +1158,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         return df_out
 
     def build_subgrid_table(df_in: pd.DataFrame) -> pd.DataFrame:
+        """Create a normalized sub-grid table used by selection analytics."""
         subgrid_df = df_in.merge(
             grid_metadata[["grid_x", "grid_y", "grid_id"]],
             on=["grid_x", "grid_y"],
@@ -1065,7 +1166,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             validate="many_to_one",
         ).rename(columns={"grid_id_x": "subgrid_id", "grid_id_y": "parent_grid_id"})
 
-        # Backfill for compatibility if a prior path did not create both columns.
+        # Backfill required columns so downstream code can rely on a fixed schema.
         if (
             "Parent Dominant Class" not in subgrid_df.columns
             and "Dominant Class" in subgrid_df.columns
@@ -1085,7 +1186,9 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         return subgrid_df[SUBGRID_COLUMNS].copy()
 
     def build_map(df_in: pd.DataFrame):
-        # Aggregate sub-grid predictions into parent-grid scores, then compute dominant class/confidence.
+        """Build one map figure and its parent-grid table from sub-grid input."""
+        # Aggregate sub-grid scores into parent-grid scores, then derive dominant
+        # class and confidence buckets for display.
         grouped_scores = df_in.groupby(["grid_x", "grid_y"], as_index=False)[
             class_cols
         ].sum()
@@ -1113,7 +1216,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             ),
         )
 
-        # Use average lat/lon for representative point rendering.
+        # Use average lat/lon as representative positions for each parent grid.
         lat_lon_df = (
             df_in.groupby(["grid_x", "grid_y"], as_index=False)[["lat", "lon"]]
             .mean()
@@ -1152,7 +1255,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             grid_df["Borough"] = "Unassigned"
 
         if render_mode == "points":
-            # Scatter map with aggregated points at grid cell resolution
+            # Render as point markers for faster interaction on larger datasets.
             fig = px.scatter_map(
                 grid_df,
                 lat="lat",
@@ -1167,7 +1270,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
                 map_style=map_type,
             )
         else:
-            # Choropleth map with polygon grid cells
+            # Render as polygons using parent-grid geometry for visual precision.
             fig = px.choropleth_map(
                 grid_df,
                 geojson=get_plotly_geojson(),
@@ -1262,37 +1365,54 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
 
 
 def selection_payload_to_outputs(payload: dict | None):
+    """Convert a selection payload into all selection-dependent UI updates.
+
+    Args:
+        payload: Bridge payload containing event metadata and selected grid ids.
+
+    Returns:
+        Tuple of updates for summary text, two composition plots, delta plot,
+        and borough chart placeholder/visibility state.
+    """
+
     def hidden_plot_update():
+        """Return a hidden plot update with no value."""
         return gr.update(value=None, visible=False)
 
     def visible_plot_update(fig: go.Figure):
+        """Return a visible plot update for the provided figure."""
         return gr.update(value=fig, visible=True)
 
     def visible_borough_or_placeholder():
+        """Show borough chart if available; otherwise keep placeholder visible."""
         fig = LAST_BOROUGH_CHANGE_FIG
         if fig is None:
             return gr.update(value=None, visible=True)
         return gr.update(value=fig, visible=True)
 
     def selected_empty_update(message: str):
+        """Create hidden selected-year composition placeholder update."""
         return gr.update(
             value=build_empty_pie("Selected Year Composition", message),
             visible="hidden",
         )
 
     def future_empty_update(message: str):
+        """Create hidden future composition placeholder update."""
         return gr.update(
             value=build_empty_pie("Future Prediction Composition", message),
             visible="hidden",
         )
 
     def delta_empty_update(message: str):
+        """Create hidden delta placeholder update."""
         return gr.update(
             value=build_empty_delta("Land-Cover Composition Delta", message),
             visible="hidden",
         )
 
     def build_land_cover_composition(subgrid_df: pd.DataFrame) -> pd.DataFrame:
+        """Aggregate sub-grid class columns into composition totals and percents."""
         if subgrid_df.empty:
             return pd.DataFrame(columns=["class", "value", "percent"])
 
@@ -1311,6 +1431,7 @@ def selection_payload_to_outputs(payload: dict | None):
         return comp_df
 
     def build_land_cover_pie(title: str, comp_df: pd.DataFrame) -> go.Figure:
+        """Build a combined pie-plus-bar composition visualization."""
         if comp_df.empty:
             return build_empty_pie(title, "No selected sub-grid data")
 
@@ -1382,6 +1503,7 @@ def selection_payload_to_outputs(payload: dict | None):
         return fig
 
     def build_delta_plot(delta_df: pd.DataFrame) -> go.Figure:
+        """Build a horizontal delta bar chart from per-class differences."""
         if delta_df.empty:
             return build_empty_delta(
                 "Land-Cover Composition Delta",
@@ -1447,8 +1569,8 @@ def selection_payload_to_outputs(payload: dict | None):
             seen.add(as_int)
             grid_ids.append(as_int)
 
-    # Ignore only empty bridge events emitted during plot re-render right after submit.
-    # Keep non-empty events so the very first real user selection is not dropped.
+    # Ignore only empty bridge events emitted during immediate post-submit
+    # re-rendering. Real selections must still be processed.
     if (
         event_kind != "borough_click"
         and payload_ts is not None
@@ -1541,11 +1663,15 @@ def selection_payload_to_outputs(payload: dict | None):
 
 
 def reset_selection_insights():
+    """Reset selection-dependent outputs to their default waiting state."""
     return selection_payload_to_outputs(None)
 
 
 def clear_selection_without_recompute():
+    """Clear current visual selections while keeping computed map data intact."""
+
     def clear_selectedpoints(fig: go.Figure | None):
+        """Return an updated figure with Plotly selectedpoints cleared."""
         if fig is None:
             return gr.update()
         fig_out = go.Figure(fig)
@@ -1572,6 +1698,7 @@ def clear_selection_without_recompute():
 
 
 def build_map_titles(start_year, time_delta):
+    """Build markdown titles for selected-year and future-year map panels."""
     start_year = int(start_year)
     time_delta = int(time_delta)
     selected_year_label_type = (
@@ -1589,6 +1716,7 @@ def update_dashboard_with_titles(
     render_mode,
     grid_cell_size,
 ):
+    """Run dashboard recomputation and append map panel titles for UI outputs."""
     selected_fig, future_fig, borough_change_fig = update_dashboard(
         start_year=start_year,
         time_delta=time_delta,
@@ -1607,6 +1735,7 @@ def submit_all_outputs(
     render_mode,
     grid_cell_size,
 ):
+    """Handle submit action by recomputing all outputs and resetting selection UI."""
     global LAST_SUBMIT_TS_MS
     LAST_SUBMIT_TS_MS = int(time.time() * 1000)
 
@@ -1649,7 +1778,7 @@ def submit_all_outputs(
     )
 
 
-# Gradio UI
+# Build the interactive Gradio layout and event wiring.
 with gr.Blocks(fill_height=True) as app:
     gr.Markdown("# 🏙️ Nuremberg Future Land-Cover Prediction")
 
