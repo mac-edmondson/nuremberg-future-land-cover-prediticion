@@ -2,9 +2,7 @@
 
 This project provides a tabular machine learning framework and interactive dashboard for predicting and visualizing urban land-cover composition and temporal change in Nuremberg. Leveraging multi-temporal Sentinel-2 satellite imagery and ESA WorldCover labels , the system extracts domain-informed spatial, spectral, and temporal features mapped to a 20-meter resolution grid. The pipeline evaluates various models, ultimately utilizing a high-performing Stacking Regressor ensemble to classify regions into built-up, vegetation, or water categories and quantify their structural changes over time. To bridge the gap between technical modeling and practical application, the included web interface empowers non-expert stakeholders, such as urban planners, to interactively explore historical ground-truth data, forecast future urban expansion, and assess model confidence across the city.
 
-## Project Report
 
-[Project Report (PDF)](docs/report/report.pdf)
 
 
 ## Dashboard
@@ -65,8 +63,11 @@ python -m pip install .
 python dashboard/app.py
 ```
 
+## Discussion
 
+### Project Report
 
+[Project Report (PDF)](docs/report/report.pdf)
 
 ### Dataset Curation and Preprocessing
 The primary input consists of multi-spectral Sentinel-2 imagery (bands B1–B12)Ground truth labels are obtained from the ESA WorldCover dataset, providing globally consistent land-cover maps at high spatial resolution* **Spatial Representation**: The study area is discretized into regular grid cells of size $20\times20$ meters to balance spatial detail with computational efficiency.
@@ -87,7 +88,15 @@ The framework evaluates a progression of predictive models, from linear baseline
 
 ### Code and Reproducibility
 The proposed pipeline is implemented in Python using scikit-learn and XGBoost, with data processing performed via Google Earth Engine. Experiments follow a temporal hold-out strategy with fixed random seeds to ensure reproducibility. All model configurations and feature engineering steps are deterministic and documented. 
-* **Datasets, Trained model artifacts, and supporting resources** : The codebase is publicly available on [Google Drive](https://drive.google.com/drive/u/3/folders/10M3mDetJYfQdM5GE7GPRY6Q_9u-eyJZ)
+
+**Datasets, Trained model artifacts, and supporting resources** : The data is publicly available on [Google Drive](https://drive.google.com/drive/u/3/folders/10M3mDetJYfQdM5GE7GPRY6Q_9u-eyJZJ).
+
+See the notebooks in the below linked directories which can be used to reproduce the results of this project. See the [Dashboard Section](#dashboard) for Python environment setup.
+
+* [**Data Extraction and Aggregation**](data_extraction)
+* [**Baseline Model Training & Basic Analysis**](baseline)
+* [**Final Model Training & Hyperparameter Optimization**](hyperparam_tuning)
+* [**Final Model(s) Post-hoc Analysis**](analysis)
 
 ### Acknowledgements
 We acknowledge the use of large language models, including ChatGPT (OpenAI) and Gemini(Google) was used for assistance in writing, editing and refining the presentation of this work. We thank the European Space Agency (ESA) for Sentinel-2 and WorldCover data, and Google Earth Engine for large-scale geospatial processing.
