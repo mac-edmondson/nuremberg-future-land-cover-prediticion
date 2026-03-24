@@ -2289,12 +2289,12 @@ with gr.Blocks(fill_height=True) as app:
         )
         start_year_dropdown = gr.Dropdown(
             choices=[2016, 2017, 2018, 2019, 2020, 2021],
-            value=2021,
+            value=2016,
             label="Start Year Selection",
         )
         time_delta_drop_down = gr.Dropdown(
             choices=[i for i in range(0, 5)],
-            value=0,
+            value=1,
             label="Future Time (Years)",
         )
         with gr.Column(scale=1, min_width=140):
