@@ -57,16 +57,7 @@ python -m pip install --upgrade pip
 5. Install the dependencies listed in pyproject.toml into the virtual environment.
 
 ```bash
-python - <<'PY'
-import subprocess
-import sys
-import tomllib
-
-with open("pyproject.toml", "rb") as f:
-	deps = tomllib.load(f)["project"]["dependencies"]
-
-subprocess.check_call([sys.executable, "-m", "pip", "install", *deps])
-PY
+python -m pip install .
 ```
 
 6. Run the dashboard.
