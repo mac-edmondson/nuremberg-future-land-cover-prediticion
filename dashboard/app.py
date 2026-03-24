@@ -157,27 +157,34 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         np.floor(base_df["y"] / grid_cell_size) * grid_cell_size
     ).astype(int)
 
-    # Generate GeoJSON for choropleth at this grid cell size
+    # Build stable grid metadata once; geometry/GeoJSON is created lazily for polygons.
     grid_metadata = (
         base_df[["delta_years", "grid_x", "grid_y"]]
         .drop_duplicates()
         .reset_index(drop=True)
     )
     grid_metadata["grid_id"] = np.arange(len(grid_metadata), dtype=int)
-    grid_metadata["geometry"] = grid_metadata.apply(
-        lambda row: box(
-            row["grid_x"],
-            row["grid_y"],
-            row["grid_x"] + grid_cell_size,
-            row["grid_y"] + grid_cell_size,
-        ),
-        axis=1,
-    )
-    display_grid_gdf = gpd.GeoDataFrame(
-        grid_metadata, geometry="geometry", crs="EPSG:32632"
-    )
-    display_grid_gdf = display_grid_gdf.to_crs("EPSG:4326")
-    plotly_geojson = json.loads(display_grid_gdf.to_json())
+    plotly_geojson = None
+
+    def get_plotly_geojson():
+        nonlocal plotly_geojson
+        if plotly_geojson is None:
+            grid_with_geometry = grid_metadata.copy()
+            grid_with_geometry["geometry"] = grid_with_geometry.apply(
+                lambda row: box(
+                    row["grid_x"],
+                    row["grid_y"],
+                    row["grid_x"] + grid_cell_size,
+                    row["grid_y"] + grid_cell_size,
+                ),
+                axis=1,
+            )
+            display_grid_gdf = gpd.GeoDataFrame(
+                grid_with_geometry, geometry="geometry", crs="EPSG:32632"
+            )
+            display_grid_gdf = display_grid_gdf.to_crs("EPSG:4326")
+            plotly_geojson = json.loads(display_grid_gdf.to_json())
+        return plotly_geojson
 
     feature_names = None
     if prediction_model is not None:
@@ -261,7 +268,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             # Choropleth map with polygon grid cells
             fig = px.choropleth_map(
                 grid_df,
-                geojson=plotly_geojson,
+                geojson=get_plotly_geojson(),
                 locations="grid_id",
                 featureidkey="properties.grid_id",
                 color="Dominant Class",
@@ -301,13 +308,13 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         )
         if render_mode == "points":
             fig.update_traces(
-                marker=dict(size=7, opacity=0.55),
-                selected=dict(marker=dict(opacity=0.9)),
+                marker=dict(size=7, opacity=0.4),
+                selected=dict(marker=dict(opacity=0.8)),
                 unselected=dict(marker=dict(opacity=0.1)),
             )
         else:
             fig.update_traces(
-                marker=dict(opacity=0.2),
+                marker=dict(opacity=0.3),
                 selected=dict(marker=dict(opacity=0.8)),
                 unselected=dict(marker=dict(opacity=0.0)),
             )
