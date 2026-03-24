@@ -20,13 +20,22 @@ Follow these steps from the repository root directory.
 
 **NOTE:** These instructions assume Python 3 is already installed on your system.
 
-1. Create a virtual environment.
+1. Pull Git LFS files before setup.
+
+```bash
+git lfs install
+git lfs pull
+```
+
+**NOTE:** If Git LFS isn't installed find instructions on installing it [here (Stack Overflow)](https://stackoverflow.com/questions/63335778/how-to-install-git-lfs#:~:text=To%20install%20git%20lfs%20on%20a%20Linux,**brew%20install%20git%2Dlfs**%20*%20**git%20lfs%20install**) or [here (Official)](https://git-lfs.com/).
+
+2. Create a virtual environment.
 
 ```bash
 python -m venv .venv
 ```
 
-2. Activate the virtual environment.
+3. Activate the virtual environment.
 
 Linux/macOS:
 
@@ -40,13 +49,13 @@ Windows (PowerShell):
 .venv\Scripts\Activate.ps1
 ```
 
-3. Upgrade pip.
+4. Upgrade pip.
 
 ```bash
 python -m pip install --upgrade pip
 ```
 
-4. Install the dependencies listed in pyproject.toml into the virtual environment.
+5. Install the dependencies listed in pyproject.toml into the virtual environment.
 
 ```bash
 python - <<'PY'
@@ -61,7 +70,7 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", *deps])
 PY
 ```
 
-5. Run the dashboard.
+6. Run the dashboard.
 
 ```bash
 python dashboard/app.py
