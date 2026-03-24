@@ -32,7 +32,6 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import requests
 from plotly.subplots import make_subplots
 from shapely.geometry import box, shape
 
@@ -119,6 +118,11 @@ NURNBERG_BOROUGH_NAMES: list[str] = [
     "Südöstliche Außenstadt",
     "Weiterer Innenstadtgürtel West/Nord/Ost",
 ]
+
+# Precomputed borough boundaries are stored as a static GeoJSON asset.
+BOROUGH_BOUNDARIES_PATH: Path = (
+    Path(__file__).resolve().parent / "assets" / "nuremberg_borough_boundaries.geojson"
+)
 
 
 # ============================================================================
@@ -271,74 +275,59 @@ def build_empty_delta(title: str, message: str) -> go.Figure:
 
 def load_nuremberg_borough_boundaries() -> gpd.GeoDataFrame | None:
     """
-    Load 10 Nuremberg borough polygons from OSM Nominatim search results.
+    Load precomputed Nuremberg borough polygons from a static GeoJSON asset.
 
-    Queries OpenStreetMap (Nominatim API) for each official borough name and retrieves
-    the corresponding GeoJSON geometry. Partial failures are tolerated; the function
-    returns successfully if at least some boroughs are loaded (minimum 1).
+    The boundaries file is generated once and committed under assets so dashboard startup
+    does not rely on live network calls.
 
     Args:
         None
 
     Returns:
         GeoDataFrame with columns (borough, geometry) in EPSG:4326 (WGS84), or None if
-        no boroughs could be loaded.
+        the file is missing, invalid, or empty.
 
     Raises:
-        Timeouts and network errors are caught internally; the function logs warnings
-        rather than raising exceptions.
+        File and parsing errors are caught internally; the function logs warnings rather
+        than raising exceptions.
     """
-    features = []
-    # Use a descriptive User-Agent for OpenStreetMap Nominatim requests
-    headers = {"User-Agent": "nuremberg-land-cover-dashboard/1.0"}
-    nominatim_search_url = "https://nominatim.openstreetmap.org/search"
-
-    # Iterate through each borough and attempt to retrieve its geometry
-    for borough in NURNBERG_BOROUGH_NAMES:
-        try:
-            # Query Nominatim with specific borough name format (borough, city, region, country)
-            response = requests.get(
-                nominatim_search_url,
-                params={
-                    "q": f"{borough}, Nürnberg, Bayern, Deutschland",
-                    "format": "jsonv2",
-                    "polygon_geojson": 1,  # Request GeoJSON polygon geometry
-                    "limit": 1,  # Only take first result
-                },
-                headers=headers,
-                timeout=45,
-            )
-            response.raise_for_status()
-            records = response.json()
-
-            # Skip if no results returned
-            if not records:
-                continue
-
-            # Extract GeoJSON geometry structure
-            geojson = records[0].get("geojson")
-            if not geojson:
-                continue
-
-            # Convert GeoJSON to Shapely geometry
-            geom = shape(geojson)
-            features.append({"borough": borough, "geometry": geom})
-
-        except Exception as err:
-            print(f"Borough boundary lookup failed for '{borough}': {err}")
-
-    # Warn if fewer than 10 boroughs were successfully loaded
-    if len(features) < 10:
-        print(
-            f"Warning: loaded {len(features)} borough boundaries out of {len(NURNBERG_BOROUGH_NAMES)}."
-        )
-
-    # Return None if no boroughs could be loaded (prevents downstream errors)
-    if not features:
+    if not BOROUGH_BOUNDARIES_PATH.exists():
+        print(f"Borough boundaries file not found: {BOROUGH_BOUNDARIES_PATH}")
         return None
 
-    # Create GeoDataFrame with WGS84 coordinate system for map projection compatibility
-    return gpd.GeoDataFrame(features, geometry="geometry", crs="EPSG:4326")
+    try:
+        boundaries = gpd.read_file(BOROUGH_BOUNDARIES_PATH)
+    except Exception as err:
+        print(
+            f"Failed to load borough boundaries from {BOROUGH_BOUNDARIES_PATH}: {err}"
+        )
+        return None
+
+    if boundaries.empty:
+        print(f"Borough boundaries file is empty: {BOROUGH_BOUNDARIES_PATH}")
+        return None
+
+    if "borough" not in boundaries.columns:
+        print(
+            f"Borough boundaries file is missing required 'borough' column: {BOROUGH_BOUNDARIES_PATH}"
+        )
+        return None
+
+    # Ensure boundaries are in WGS84 for map projection compatibility.
+    if boundaries.crs is None:
+        boundaries = boundaries.set_crs("EPSG:4326", allow_override=True)
+    else:
+        boundaries = boundaries.to_crs("EPSG:4326")
+
+    # Keep output schema stable for downstream spatial join logic.
+    boundaries = boundaries[["borough", "geometry"]].copy()
+
+    if len(boundaries) < len(NURNBERG_BOROUGH_NAMES):
+        print(
+            f"Warning: loaded {len(boundaries)} borough boundaries out of {len(NURNBERG_BOROUGH_NAMES)}."
+        )
+
+    return boundaries
 
 
 # Load borough boundaries at module initialization; used globally by multiple functions
