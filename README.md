@@ -1,10 +1,72 @@
-# Nuremberg Future Land-Cover Prediction
+# Nuremberg Future Land-Cover Prediticion
 
-This project provides a tabular machine learning framework and interactive dashboard for predicting and visualizing urban land-cover composition and temporal change in Nuremberg. Leveraging multi-temporal Sentinel-2 satellite imagery and ESA WorldCover labels, the system extracts domain-informed spatial, spectral, and temporal features mapped to a 20-meter resolution grid . The pipeline evaluates various models, ultimately utilizing a high-performing Stacking Regressor ensemble to classify regions into built-up, vegetation, or water categories and quantify their structural changes over time . To bridge the gap between technical modeling and practical application, the included web interface empowers non-expert stakeholders, such as urban planners, to interactively explore historical ground-truth data, forecast future urban expansion, and assess model confidence across the city.
+This project provides a tabular machine learning framework and interactive dashboard for predicting and visualizing urban land-cover composition and temporal change in Nuremberg. Leveraging multi-temporal Sentinel-2 satellite imagery and ESA WorldCover labels , the system extracts domain-informed spatial, spectral, and temporal features mapped to a 20-meter resolution grid. The pipeline evaluates various models, ultimately utilizing a high-performing Stacking Regressor ensemble to classify regions into built-up, vegetation, or water categories and quantify their structural changes over time. To bridge the gap between technical modeling and practical application, the included web interface empowers non-expert stakeholders, such as urban planners, to interactively explore historical ground-truth data, forecast future urban expansion, and assess model confidence across the city.
 
 ## Project Report
 
 [Project Report (PDF)](docs/report/report.pdf)
+
+
+## Dashboard
+### Dashboard Demo
+
+![Dashboard Demo](docs/assets/dashboard_demo.gif)
+
+
+### Running the dashboard
+
+Follow these steps from the repository root directory.
+
+**NOTE:** These instructions assume Python 3 is already installed on your system.
+
+1. Pull Git LFS files before setup.
+
+```bash
+git lfs pull
+```
+
+**NOTE:** If Git LFS isn't installed find instructions on installing it [here (Stack Overflow)](https://stackoverflow.com/questions/63335778/how-to-install-git-lfs#:~:text=To%20install%20git%20lfs%20on%20a%20Linux,**brew%20install%20git%2Dlfs**%20*%20**git%20lfs%20install**) or [here (Official)](https://git-lfs.com/).
+
+2. Create a virtual environment.
+
+```bash
+python -m venv .venv
+```
+
+3. Activate the virtual environment.
+
+Linux/macOS:
+
+```bash
+source .venv/bin/activate
+```
+
+Windows (PowerShell):
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+4. Upgrade pip.
+
+```bash
+python -m pip install --upgrade pip
+```
+
+5. Install the dependencies listed in pyproject.toml into the virtual environment.
+
+```bash
+python -m pip install .
+```
+
+6. Run the dashboard.
+
+```bash
+python dashboard/app.py
+```
+
+
+
 
 ### Dataset Curation and Preprocessing
 The primary input consists of multi-spectral Sentinel-2 imagery (bands B1–B12)Ground truth labels are obtained from the ESA WorldCover dataset, providing globally consistent land-cover maps at high spatial resolution* **Spatial Representation**: The study area is discretized into regular grid cells of size $20\times20$ meters to balance spatial detail with computational efficiency.
@@ -24,11 +86,9 @@ The framework evaluates a progression of predictive models, from linear baseline
 * **Interpretability (SHAP)**: Analysis using SHAP values confirmed that vegetation-related indices (EVI2, SAVI) are the most influential features. For the built-up class, the temporal "delta years" feature and neighboring spectral bands (B4 and B8) play significant roles in capturing urban expansion.
 
 ### Code and Reproducibility
-The pipeline is implemented in Python using `scikit-learn` and `XGBoost`, with data processing performed via Google Earth Engine 
-* **Validation**: Experiments follow a temporal hold-out strategy, training on earlier years and evaluating on later labels to reflect real-world predictive use cases.
-* **Consistency**: To ensure reproducibility, the codebase uses fixed random seeds and deterministic feature engineering steps.
-* **Repository**: The codebase is publicly available at [https://github.com/mac-edmondson/machine-learning-final-project-ws2025](https://github.com/mac-edmondson/machine-learning-final-project-ws2025).
+The proposed pipeline is implemented in Python using scikit-learn and XGBoost, with data processing performed via Google Earth Engine. Experiments follow a temporal hold-out strategy with fixed random seeds to ensure reproducibility. All model configurations and feature engineering steps are deterministic and documented. 
+* **Datasets, Trained model artifacts, and supporting resources** : The codebase is publicly available at [https://drive.google.com/drive/u/3/folders/10M3mDetJYfQdM5GE7GPRY6Q_9u-eyJZJ]
 
 ### Acknowledgements
-Large language models, including ChatGPT (OpenAI) and Gemini (Google), were used for assistance in writing and refining the presentation of this work We thank the European Space Agency (ESA) for Sentinel-2 and WorldCover data, and Google Earth Engine for large-scale geospatial processing
+We acknowledge the use of large language models, including ChatGPT (OpenAI) and Gemini(Google) was used for assistance in writing, editing and refining the presentation of this work. We thank the European Space Agency (ESA) for Sentinel-2 and WorldCover data, and Google Earth Engine for large-scale geospatial processing.
 
