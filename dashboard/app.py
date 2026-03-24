@@ -23,6 +23,7 @@ from shapely.geometry import box, shape
 
 lat_center = 49.4330
 lon_center = 11.0767
+DASHBOARD_DIR = Path(__file__).resolve().parent
 
 class_cols = [
     "built_up",
@@ -93,7 +94,7 @@ NURNBERG_BOROUGH_NAMES = [
 
 # Precomputed borough boundaries are stored as a static GeoJSON asset.
 BOROUGH_BOUNDARIES_PATH: Path = (
-    Path(__file__).resolve().parent / "assets" / "nuremberg_borough_boundaries.geojson"
+    DASHBOARD_DIR / "assets" / "nuremberg_borough_boundaries.geojson"
 )
 
 LAST_BOROUGH_CHANGE_FIG = None
@@ -870,8 +871,14 @@ def load_data_from_csv(data_path):
         GeoDataFrame in EPSG:4326 with centroids, vegetation target, and spectral
         index features.
     """
+    # Resolve relative paths against the dashboard script directory so the app
+    # works regardless of the process working directory.
+    data_file = Path(data_path)
+    if not data_file.is_absolute():
+        data_file = DASHBOARD_DIR / data_file
+
     # Load parquet data at full row-level detail.
-    df = pd.read_parquet(data_path)
+    df = pd.read_parquet(data_file)
 
     # Parse per-row GeoJSON geometry payloads into shapely objects.
     df["geometry"] = pd.Series(
@@ -1006,6 +1013,8 @@ def load_prediction_model(model_path="artifacts/XGBoost_delta.pkl"):
         Deserialized model object, or ``None`` when the file is absent.
     """
     model_file = Path(model_path)
+    if not model_file.is_absolute():
+        model_file = DASHBOARD_DIR / model_file
     if not model_file.exists():
         return None
 
