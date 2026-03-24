@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import requests
 from plotly.subplots import make_subplots
 from shapely.geometry import box, shape
 
@@ -84,6 +83,11 @@ NURNBERG_BOROUGH_NAMES = [
     "Südöstliche Außenstadt",
     "Weiterer Innenstadtgürtel West/Nord/Ost",
 ]
+
+# Precomputed borough boundaries are stored as a static GeoJSON asset.
+BOROUGH_BOUNDARIES_PATH: Path = (
+    Path(__file__).resolve().parent / "assets" / "nuremberg_borough_boundaries.geojson"
+)
 
 LAST_BOROUGH_CHANGE_FIG = None
 LAST_MAP_FIGURES: dict[str, go.Figure | None] = {
@@ -160,45 +164,60 @@ def build_empty_delta(title: str, message: str) -> go.Figure:
 
 
 def load_nuremberg_borough_boundaries() -> gpd.GeoDataFrame | None:
-    """Load 10 Nuremberg borough polygons from OSM Nominatim search results."""
-    features = []
-    headers = {"User-Agent": "nuremberg-land-cover-dashboard/1.0"}
-    url = "https://nominatim.openstreetmap.org/search"
+    """
+    Load precomputed Nuremberg borough polygons from a static GeoJSON asset.
 
-    for borough in NURNBERG_BOROUGH_NAMES:
-        try:
-            response = requests.get(
-                url,
-                params={
-                    "q": f"{borough}, Nürnberg, Bayern, Deutschland",
-                    "format": "jsonv2",
-                    "polygon_geojson": 1,
-                    "limit": 1,
-                },
-                headers=headers,
-                timeout=45,
-            )
-            response.raise_for_status()
-            records = response.json()
-            if not records:
-                continue
-            geojson = records[0].get("geojson")
-            if not geojson:
-                continue
-            geom = shape(geojson)
-            features.append({"borough": borough, "geometry": geom})
-        except Exception as err:
-            print(f"Borough boundary lookup failed for '{borough}': {err}")
+    The boundaries file is generated once and committed under assets so dashboard startup
+    does not rely on live network calls.
 
-    if len(features) < 10:
-        print(
-            f"Warning: loaded {len(features)} borough boundaries out of {len(NURNBERG_BOROUGH_NAMES)}."
-        )
+    Args:
+        None
 
-    if not features:
+    Returns:
+        GeoDataFrame with columns (borough, geometry) in EPSG:4326 (WGS84), or None if
+        the file is missing, invalid, or empty.
+
+    Raises:
+        File and parsing errors are caught internally; the function logs warnings rather
+        than raising exceptions.
+    """
+    if not BOROUGH_BOUNDARIES_PATH.exists():
+        print(f"Borough boundaries file not found: {BOROUGH_BOUNDARIES_PATH}")
         return None
 
-    return gpd.GeoDataFrame(features, geometry="geometry", crs="EPSG:4326")
+    try:
+        boundaries = gpd.read_file(BOROUGH_BOUNDARIES_PATH)
+    except Exception as err:
+        print(
+            f"Failed to load borough boundaries from {BOROUGH_BOUNDARIES_PATH}: {err}"
+        )
+        return None
+
+    if boundaries.empty:
+        print(f"Borough boundaries file is empty: {BOROUGH_BOUNDARIES_PATH}")
+        return None
+
+    if "borough" not in boundaries.columns:
+        print(
+            f"Borough boundaries file is missing required 'borough' column: {BOROUGH_BOUNDARIES_PATH}"
+        )
+        return None
+
+    # Ensure boundaries are in WGS84 for map projection compatibility.
+    if boundaries.crs is None:
+        boundaries = boundaries.set_crs("EPSG:4326", allow_override=True)
+    else:
+        boundaries = boundaries.to_crs("EPSG:4326")
+
+    # Keep output schema stable for downstream spatial join logic.
+    boundaries = boundaries[["borough", "geometry"]].copy()
+
+    if len(boundaries) < len(NURNBERG_BOROUGH_NAMES):
+        print(
+            f"Warning: loaded {len(boundaries)} borough boundaries out of {len(NURNBERG_BOROUGH_NAMES)}."
+        )
+
+    return boundaries
 
 
 BOROUGH_BOUNDARIES_GDF = load_nuremberg_borough_boundaries()
@@ -1725,10 +1744,11 @@ with gr.Blocks(fill_height=True) as app:
         gr.Markdown("""
         ---
         ### ⚠️ Limitations & Disclosures
-        * **DO NOT** use for zoning or building permits.
-        * Prediction model is aggregated at the grid level.
-        * Labels contain inherent noise and historical errors.
-        * Model relies on historical trends and cannot predict external shocks or abrupt policy shifts.
+        * **Not for Official Use:** This tool is designed for exploratory analysis and high-level insights, and is not intended to replace high-resolution surveys or official land-use assessments.
+        * **Grid Resolution Constraints:** Predictions are aggregated at a 20x20 meter grid level, which may obscure fine-grained land-cover patterns. Predictions are generally less reliable in mixed-use transition regions where a single cell contains heterogeneous land cover.
+        * **Historical Label Noise:** The model is trained on ESA WorldCover labels from 2020/2021, which have an estimated accuracy of 70-75%. Inherent noise in these satellite-derived labels impacts the model's baseline accuracy.
+        * **Seasonal & Temporal Ambiguity:** Short-term seasonal fluctuations (e.g., temporary vegetation changes) can sometimes be mistaken by the model for genuine land-cover conversion. Furthermore, prediction uncertainty is largest significantly for short-term (0 years) and long-term forecasts (4 years out).
+        * **Confidence vs. Reality:** The displayed "Confidence" estimate reflects the model's internal mathematical certainty, not necessarily true ground-truth reliability.
         """)
 
     update_args = {
