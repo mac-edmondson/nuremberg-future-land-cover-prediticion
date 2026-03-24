@@ -1,6 +1,27 @@
+"""
+Nuremberg Future Land-Cover Prediction Dashboard
+
+This Gradio-based web application provides interactive visualization and analysis of land-cover
+changes in Nuremberg, Germany. It leverages Sentinel-2 satellite imagery, XGBoost predictions,
+and GIS data to forecast future land-cover compositions across georeferenced grid cells.
+
+Key Features:
+  - Compare actual vs. predicted land cover for user-selected years
+  - Interactive borough-level composition analysis
+  - Detailed sub-grid breakdowns with confidence estimates
+  - Dual-map synchronization for seamless selection and exploration
+  - Zoom and pan to specific boroughs for focused analysis
+
+Data Sources:
+  - ESA WorldCover 2020/2021 satellite imagery (Sentinel-2)
+  - Nuremberg borough boundaries from OpenStreetMap Nominatim
+  - XGBoost delta-year prediction model trained on historical imagery
+"""
+
 import json
 import pickle
 import time
+import traceback
 import warnings
 from pathlib import Path
 
@@ -15,16 +36,47 @@ import requests
 from plotly.subplots import make_subplots
 from shapely.geometry import box, shape
 
-lat_center = 49.4330
-lon_center = 11.0767
+# ============================================================================
+# MAP CENTER AND COORDINATE CONSTANTS
+# ============================================================================
 
-class_cols = [
+# Geographic center of Nuremberg for map initialization
+LAT_CENTER: float = 49.4330
+LON_CENTER: float = 11.0767
+
+
+# ============================================================================
+# LAND COVER CLASS DEFINITIONS
+# ============================================================================
+
+# Primary land cover classes predicted by the model
+CLASS_COLS: list[str] = [
     "built_up",
     "vegetation",
     "water",
 ]
 
-SELECTION_COLUMNS = [
+# Human-readable labels for land cover classes
+LAND_COVER_LABELS: dict[str, str] = {
+    "built_up": "Built Up",
+    "vegetation": "Vegetation",
+    "water": "Water",
+}
+
+# Hex color codes for consistent visualization across all plots
+LAND_COVER_COLORS: dict[str, str] = {
+    "Built Up": "#fa0000",  # Red for built-up areas
+    "Vegetation": "#006400",  # Dark green for vegetation
+    "Water": "#0064ff",  # Blue for water
+}
+
+
+# ============================================================================
+# DATAFRAME COLUMN SPECIFICATIONS
+# ============================================================================
+
+# Columns included in grid-level aggregated output tables
+SELECTION_COLUMNS: list[str] = [
     "grid_id",
     "Dominant Class",
     "built_up",
@@ -34,7 +86,8 @@ SELECTION_COLUMNS = [
     "lon",
 ]
 
-SUBGRID_COLUMNS = [
+# Columns included in sub-grid level detailed output tables
+SUBGRID_COLUMNS: list[str] = [
     "parent_grid_id",
     "subgrid_id",
     "grid_x",
@@ -48,31 +101,13 @@ SUBGRID_COLUMNS = [
     "lon",
 ]
 
-LAST_GRID_TABLES: dict[str, pd.DataFrame] = {
-    "selected_year": pd.DataFrame(columns=SELECTION_COLUMNS),
-    "future_prediction": pd.DataFrame(columns=SELECTION_COLUMNS),
-}
 
-LAST_SUBGRID_TABLES: dict[str, pd.DataFrame] = {
-    "selected_year": pd.DataFrame(columns=SUBGRID_COLUMNS),
-    "future_prediction": pd.DataFrame(columns=SUBGRID_COLUMNS),
-}
+# ============================================================================
+# NUREMBERG BOROUGH DEFINITIONS
+# ============================================================================
 
-LAND_COVER_LABELS = {
-    "built_up": "Built Up",
-    "vegetation": "Vegetation",
-    "water": "Water",
-}
-
-LAND_COVER_COLORS = {
-    "Built Up": "#fa0000",
-    "Vegetation": "#006400",
-    "Water": "#0064ff",
-}
-
-DEFAULT_SELECTION_MESSAGE = "Select a region to compare land-cover composition between selected year and future prediction."
-
-NURNBERG_BOROUGH_NAMES = [
+# Official 10 Nuremberg borough names for spatial joins and visualization
+NURNBERG_BOROUGH_NAMES: list[str] = [
     "Altstadt und engere Innenstadt",
     "Weiterer Innenstadtgürtel Süd",
     "Östliche Außenstadt",
@@ -85,16 +120,60 @@ NURNBERG_BOROUGH_NAMES = [
     "Weiterer Innenstadtgürtel West/Nord/Ost",
 ]
 
-LAST_BOROUGH_CHANGE_FIG = None
+
+# ============================================================================
+# GLOBAL STATE FOR CACHING AND EVENT SYNCHRONIZATION
+# ============================================================================
+
+# Cache for grid-level aggregated data (parent grids with dominant classes)
+LAST_GRID_TABLES: dict[str, pd.DataFrame] = {
+    "selected_year": pd.DataFrame(columns=SELECTION_COLUMNS),
+    "future_prediction": pd.DataFrame(columns=SELECTION_COLUMNS),
+}
+
+# Cache for sub-grid level data (detailed pixel-level composition per parent grid)
+LAST_SUBGRID_TABLES: dict[str, pd.DataFrame] = {
+    "selected_year": pd.DataFrame(columns=SUBGRID_COLUMNS),
+    "future_prediction": pd.DataFrame(columns=SUBGRID_COLUMNS),
+}
+
+# Cache for the borough-level composition change chart (updated on Submit)
+LAST_BOROUGH_CHANGE_FIG: go.Figure | None = None
+
+# Cache for the two interactive maps (selected year and future prediction)
 LAST_MAP_FIGURES: dict[str, go.Figure | None] = {
     "selected_year": None,
     "future_prediction": None,
 }
-LAST_SUBMIT_TS_MS = 0
-SELECTION_EVENT_GUARD_MS = 900
+
+# Timestamp (milliseconds) of the last Submit button click for event guard
+LAST_SUBMIT_TS_MS: int = 0
+
+# Time window (milliseconds) for filtering out stale re-render events from Plotly
+SELECTION_EVENT_GUARD_MS: int = 900
+
+# User-facing message displayed when no region is selected
+DEFAULT_SELECTION_MESSAGE: str = "Select a region to compare land-cover composition between selected year and future prediction."
+
+
+# ============================================================================
+# PLACEHOLDER FIGURE BUILDERS
+# ============================================================================
 
 
 def build_empty_borough_change_plot(message: str) -> go.Figure:
+    """
+    Create an empty borough change chart with a centered message.
+
+    Used as a placeholder when no data is available yet or while data is loading.
+    Displays a centered text annotation on a blank figure with appropriate styling.
+
+    Args:
+        message: The user-facing message to display in the center of the figure.
+
+    Returns:
+        A Plotly Figure with empty state styling and centered message.
+    """
     fig = go.Figure()
     fig.update_layout(
         title="Borough Change Overview",
@@ -116,6 +195,19 @@ def build_empty_borough_change_plot(message: str) -> go.Figure:
 
 
 def build_empty_pie(title: str, message: str) -> go.Figure:
+    """
+    Create an empty pie chart placeholder with a centered message.
+
+    Used when no grid selection exists or data hasn't been computed yet.
+    Maintains consistent styling with other empty state plots.
+
+    Args:
+        title: The title to display at the top of the figure.
+        message: The user-facing message to display in the center of the figure.
+
+    Returns:
+        A Plotly Figure with pie chart styling and centered message.
+    """
     fig = go.Figure()
     fig.update_layout(
         title=title,
@@ -137,6 +229,19 @@ def build_empty_pie(title: str, message: str) -> go.Figure:
 
 
 def build_empty_delta(title: str, message: str) -> go.Figure:
+    """
+    Create an empty delta/bar chart placeholder with a centered message.
+
+    Used when no grid selection exists or delta data hasn't been computed yet.
+    Maintains consistent ax is labels and styling with data-filled delta plots.
+
+    Args:
+        title: The title to display at the top of the figure.
+        message: The user-facing message to display in the center of the figure.
+
+    Returns:
+        A Plotly Figure with delta chart styling and centered message.
+    """
     fig = go.Figure()
     fig.update_layout(
         title=title,
@@ -159,75 +264,131 @@ def build_empty_delta(title: str, message: str) -> go.Figure:
     return fig
 
 
-def load_nuremberg_borough_boundaries() -> gpd.GeoDataFrame | None:
-    """Load 10 Nuremberg borough polygons from OSM Nominatim search results."""
-    features = []
-    headers = {"User-Agent": "nuremberg-land-cover-dashboard/1.0"}
-    url = "https://nominatim.openstreetmap.org/search"
+# ============================================================================
+# GIS AND BOROUGH BOUNDARY FUNCTIONS
+# ============================================================================
 
+
+def load_nuremberg_borough_boundaries() -> gpd.GeoDataFrame | None:
+    """
+    Load 10 Nuremberg borough polygons from OSM Nominatim search results.
+
+    Queries OpenStreetMap (Nominatim API) for each official borough name and retrieves
+    the corresponding GeoJSON geometry. Partial failures are tolerated; the function
+    returns successfully if at least some boroughs are loaded (minimum 1).
+
+    Args:
+        None
+
+    Returns:
+        GeoDataFrame with columns (borough, geometry) in EPSG:4326 (WGS84), or None if
+        no boroughs could be loaded.
+
+    Raises:
+        Timeouts and network errors are caught internally; the function logs warnings
+        rather than raising exceptions.
+    """
+    features = []
+    # Use a descriptive User-Agent for OpenStreetMap Nominatim requests
+    headers = {"User-Agent": "nuremberg-land-cover-dashboard/1.0"}
+    nominatim_search_url = "https://nominatim.openstreetmap.org/search"
+
+    # Iterate through each borough and attempt to retrieve its geometry
     for borough in NURNBERG_BOROUGH_NAMES:
         try:
+            # Query Nominatim with specific borough name format (borough, city, region, country)
             response = requests.get(
-                url,
+                nominatim_search_url,
                 params={
                     "q": f"{borough}, Nürnberg, Bayern, Deutschland",
                     "format": "jsonv2",
-                    "polygon_geojson": 1,
-                    "limit": 1,
+                    "polygon_geojson": 1,  # Request GeoJSON polygon geometry
+                    "limit": 1,  # Only take first result
                 },
                 headers=headers,
                 timeout=45,
             )
             response.raise_for_status()
             records = response.json()
+
+            # Skip if no results returned
             if not records:
                 continue
+
+            # Extract GeoJSON geometry structure
             geojson = records[0].get("geojson")
             if not geojson:
                 continue
+
+            # Convert GeoJSON to Shapely geometry
             geom = shape(geojson)
             features.append({"borough": borough, "geometry": geom})
+
         except Exception as err:
             print(f"Borough boundary lookup failed for '{borough}': {err}")
 
+    # Warn if fewer than 10 boroughs were successfully loaded
     if len(features) < 10:
         print(
             f"Warning: loaded {len(features)} borough boundaries out of {len(NURNBERG_BOROUGH_NAMES)}."
         )
 
+    # Return None if no boroughs could be loaded (prevents downstream errors)
     if not features:
         return None
 
+    # Create GeoDataFrame with WGS84 coordinate system for map projection compatibility
     return gpd.GeoDataFrame(features, geometry="geometry", crs="EPSG:4326")
 
 
+# Load borough boundaries at module initialization; used globally by multiple functions
 BOROUGH_BOUNDARIES_GDF = load_nuremberg_borough_boundaries()
 
 
 def calculate_borough_bounds() -> dict[str, dict]:
-    """Calculate lat/lon bounds for each borough from BOROUGH_BOUNDARIES_GDF.
+    """
+    Calculate lat/lon bounds and zoom level for each borough from BOROUGH_BOUNDARIES_GDF.
+
+    Computes bounding boxes (min/max lat/lon), center coordinates, and an appropriate
+    zoom level based on borough spatial extent. Used for map zoom-to-borough functionality.
+
+    Args:
+        None
 
     Returns:
-        Dictionary mapping borough names to {min_lat, max_lat, min_lon, max_lon, center_lat, center_lon, zoom}
+        Dictionary mapping borough names to dicts with keys:
+        - min_lat, max_lat, min_lon, max_lon: Bounding box in decimal degrees
+        - center_lat, center_lon: Centroid coordinates
+        - zoom: Integer zoom level (11-14) suitable for Plotly map view
+
+        Returns empty dict if BOROUGH_BOUNDARIES_GDF is None or empty.
     """
     bounds = {}
+
+    # Return empty dict if borough data unavailable
     if BOROUGH_BOUNDARIES_GDF is None or BOROUGH_BOUNDARIES_GDF.empty:
         return bounds
 
+    # Iterate through each borough and compute its spatial bounds
     for _, row in BOROUGH_BOUNDARIES_GDF.iterrows():
         borough_name = row["borough"]
         geom = row["geometry"]
-        minx, miny, maxx, maxy = geom.bounds  # (lon_min, lat_min, lon_max, lat_max)
 
+        # Use Shapely bounds method: (minx, miny, maxx, maxy) = (lon_min, lat_min, lon_max, lat_max)
+        minx, miny, maxx, maxy = geom.bounds
+
+        # Calculate center coordinates as average of bounds
         center_lon = (minx + maxx) / 2
         center_lat = (miny + maxy) / 2
 
-        # Calculate zoom level based on borough size
-        # Smaller bounds = higher zoom
+        # Compute borough spatial extent in degrees
         lon_span = maxx - minx
         lat_span = maxy - miny
         max_span = max(lon_span, lat_span)
-        # Empirical formula for Plotly zoom levels
+
+        # Empirical formula for Plotly zoom levels based on spatial extent.
+        # Smaller boroughs (~0.02 degrees) → higher zoom (14)
+        # Larger boroughs (~0.10 degrees) → lower zoom (11)
         zoom = max(11, min(14, int(14 - (max_span * 100))))
 
         bounds[borough_name] = {
@@ -247,6 +408,31 @@ def build_top_changed_boroughs_chart(
     selected_subgrid_df: pd.DataFrame,
     future_subgrid_df: pd.DataFrame,
 ) -> go.Figure:
+    """
+    Build a stacked bar chart showing positive land-cover composition changes by borough.
+
+    Compares current (selected year) composition to future (predicted) composition for each
+    borough, and displays only positive changes (classes that increased). This provides insight
+    into which boroughs are gaining specific land-cover types.
+
+    Processing steps:
+    1. Spatially join sub-grid points to borough polygons
+    2. Aggregate land-cover class scores by borough
+    3. Convert to percentages to ensure comparable metrics
+    4. Compute per-class positive deltas (future_pct - selected_pct, clipped at 0)
+    5. Ensure all 10 official boroughs appear (fill missing with 0)
+    6. Create stacked bar chart with text value labels
+
+    Args:
+        selected_subgrid_df: DataFrame with selected year sub-grid data (columns: lat, lon, built_up, vegetation, water)
+        future_subgrid_df: DataFrame with future prediction sub-grid data (same schema)
+
+    Returns:
+        Plotly Figure showing a stacked bar chart with one bar per borough, grouped by
+        land-cover class (Built Up, Vegetation, Water) with value labels. Returns empty
+        state figure if input data is insufficient or borough boundaries unavailable.
+    """
+    # Check for empty input dataframes
     if selected_subgrid_df.empty or future_subgrid_df.empty:
         return build_empty_borough_change_plot("No grid data available yet.")
 
@@ -255,96 +441,143 @@ def build_top_changed_boroughs_chart(
         return build_empty_borough_change_plot("Borough boundaries are not available.")
 
     def attach_boroughs_to_subgrid(grid_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Spatially join sub-grid points to borough polygons.
+
+        Creates point geometries from lat/lon and performs spatial join to find which
+        borough contains each point. Points outside all boroughs are labeled "Unassigned".
+
+        Args:
+            grid_df: DataFrame with lat/lon columns
+
+        Returns:
+            DataFrame with added "borough" column containing borough name or "Unassigned"
+        """
+        # Create point geometries from latitude/longitude coordinates
         points_gdf = gpd.GeoDataFrame(
-            grid_df[["lat", "lon", *class_cols]].copy(),
+            grid_df[["lat", "lon", *CLASS_COLS]].copy(),
             geometry=gpd.points_from_xy(grid_df["lon"], grid_df["lat"]),
             crs="EPSG:4326",
             index=grid_df.index,
         )
+
+        # Spatial join: find borough polygon containing each point
         joined = gpd.sjoin(
             points_gdf,
             boundaries[["borough", "geometry"]],
             how="left",
             predicate="intersects",
         )
+
+        # Remove geometry columns and fill NA borough names
         out = joined.drop(columns=["geometry", "index_right"], errors="ignore")
         out["borough"] = out["borough"].fillna("Unassigned")
         return out
 
+    # Perform spatial joins for both selected and future data
     selected_with_borough = attach_boroughs_to_subgrid(selected_subgrid_df)
     future_with_borough = attach_boroughs_to_subgrid(future_subgrid_df)
 
+    # Aggregate class scores by borough (sum all sub-grid values within each borough)
     selected_scores = selected_with_borough.groupby("borough", as_index=False)[
-        class_cols
+        CLASS_COLS
     ].sum()
     future_scores = future_with_borough.groupby("borough", as_index=False)[
-        class_cols
+        CLASS_COLS
     ].sum()
 
-    # Convert borough-level sums into percentages so changes are comparable.
     def to_percent(df_scores: pd.DataFrame) -> pd.DataFrame:
+        """
+        Convert class score sums to percentages (0-100) within each borough.
+
+        Ensures scores are comparable across boroughs despite different grid densities.
+        Handles edge case of zero-sum rows by returning 0% for all classes.
+
+        Args:
+            df_scores: DataFrame with columns (borough, built_up, vegetation, water)
+
+        Returns:
+            Same DataFrame with CLASS_COLS values converted to percentages
+        """
         out = df_scores.copy()
-        sums = out[class_cols].sum(axis=1)
-        for col in class_cols:
+        # Compute total score per borough
+        sums = out[CLASS_COLS].sum(axis=1)
+        # Convert each class to percentage (avoid division by zero)
+        for col in CLASS_COLS:
             out[col] = np.where(sums > 1e-12, (out[col] / sums) * 100.0, 0.0)
         return out
 
+    # Convert both selected and future scores to percentages
     selected_pct = to_percent(selected_scores).rename(
-        columns={c: f"{c}_selected" for c in class_cols}
+        columns={c: f"{c}_selected" for c in CLASS_COLS}
     )
     future_pct = to_percent(future_scores).rename(
-        columns={c: f"{c}_future" for c in class_cols}
+        columns={c: f"{c}_future" for c in CLASS_COLS}
     )
 
+    # Merge selected and future data by borough (outer join to capture all boroughs)
     merged = selected_pct.merge(future_pct, on="borough", how="outer")
     if merged.empty:
         return build_empty_borough_change_plot("No borough stats available.")
 
-    for col in class_cols:
+    # Fill missing percentages with 0 (important for partial data)
+    for col in CLASS_COLS:
         merged[f"{col}_selected"] = merged[f"{col}_selected"].fillna(0.0)
         merged[f"{col}_future"] = merged[f"{col}_future"].fillna(0.0)
 
-    for col in class_cols:
+    # Compute per-class change (positive delta = future_pct - selected_pct, clipped at 0)
+    for col in CLASS_COLS:
         delta_col = f"{col}_delta_pp"
         merged[delta_col] = merged[f"{col}_future"] - merged[f"{col}_selected"]
+        # Only keep positive deltas; negative deltas become 0
         merged[f"{col}_positive_delta_pp"] = merged[delta_col].clip(lower=0.0)
 
-    positive_cols = [f"{col}_positive_delta_pp" for col in class_cols]
+    # Prepare data for all 10 official boroughs (fill missing with 0)
+    positive_cols = [f"{col}_positive_delta_pp" for col in CLASS_COLS]
     full = pd.DataFrame({"borough": NURNBERG_BOROUGH_NAMES}).merge(
         merged[["borough", *positive_cols]],
         on="borough",
         how="left",
     )
+    # Fill missing rows (boroughs with no data) with 0
     for col in positive_cols:
         full[col] = full[col].fillna(0.0)
 
     if full.empty:
         return build_empty_borough_change_plot("No borough change values available.")
 
+    # Create class label and color mappings for visualization
     class_label_map = {
         "built_up": "Built Up",
         "vegetation": "Vegetation",
         "water": "Water",
     }
     class_color_map = {
-        "Built Up": color_map.get("Built Up", "#fa0000"),
-        "Vegetation": color_map.get("Vegetation", "#006400"),
-        "Water": color_map.get("Water", "#0064ff"),
+        "Built Up": LAND_COVER_COLORS.get("Built Up", "#fa0000"),
+        "Vegetation": LAND_COVER_COLORS.get("Vegetation", "#006400"),
+        "Water": LAND_COVER_COLORS.get("Water", "#0064ff"),
     }
+
+    # Reshape data from wide to long format for Plotly bar chart
     positive_long = full.melt(
         id_vars="borough",
         value_vars=positive_cols,
         var_name="class_metric",
         value_name="positive_delta_pp",
     )
+    # Extract class name from metric column (remove "_positive_delta_pp" suffix)
     positive_long["class"] = positive_long["class_metric"].str.replace(
         "_positive_delta_pp", "", regex=False
     )
+    # Apply human-readable labels to class names
     positive_long["class"] = positive_long["class"].map(class_label_map)
+
+    # Compute total positive change per borough for text annotation
     borough_totals = full.assign(
         total_positive_change_pp=full[positive_cols].sum(axis=1)
     )
 
+    # Create stacked bar chart
     fig = px.bar(
         positive_long,
         x="borough",
@@ -353,9 +586,13 @@ def build_top_changed_boroughs_chart(
         color_discrete_map=class_color_map,
         barmode="stack",
     )
+
+    # Enhance hover text with formatted percentage
     fig.update_traces(
         hovertemplate="%{x}<br>%{fullData.name} increase: %{y:.2f}%<extra></extra>",
     )
+
+    # Add text annotation labels above each bar showing total change
     fig.add_scatter(
         x=borough_totals["borough"],
         y=borough_totals["total_positive_change_pp"],
@@ -366,6 +603,8 @@ def build_top_changed_boroughs_chart(
         hoverinfo="skip",
         showlegend=False,
     )
+
+    # Update layout for professional appearance
     fig.update_layout(
         title="Positive Composition Change Across All 10 Boroughs",
         height=620,
@@ -376,8 +615,11 @@ def build_top_changed_boroughs_chart(
         plot_bgcolor="white",
         paper_bgcolor="white",
     )
+    # Rotate x-axis labels for readability given long German borough names
     fig.update_xaxes(tickangle=-30)
+    # Disable gridlines for cleaner appearance
     fig.update_yaxes(showgrid=False)
+
     return fig
 
 
@@ -780,47 +1022,107 @@ class PlotSelectionBridge(gr.HTML):
         }
 
 
-def load_data_from_csv(data_path):
-    # 1. Load CSV data at full resolution (no aggregation)
+# ============================================================================
+# DATA LOADING AND UTILITY FUNCTIONS
+# ============================================================================
+
+
+def load_data_from_csv(data_path: str) -> gpd.GeoDataFrame:
+    """
+    Load satellite imagery data from parquet file and prepare for analysis.
+
+    Reads the parquet file, parses geometry from GeoJSON, creates a GeoDataFrame,
+    and computes derived vegetation aggregate and spectral indices (NDVI, EVI2, etc.)
+    for use in the prediction model.
+
+    Processing steps:
+    1. Read parquet file into DataFrame
+    2. Parse .geo column (GeoJSON strings) into Shapely geometries
+    3. Create GeoDataFrame in projected CRS (UTM Zone 32N)
+    4. Create unique grid IDs and compute centroids
+    5. Convert to WGS84 for map rendering
+    6. Aggregate vegetation sub-classes into single vegetation column
+    7. Compute spectral indices from Sentinel-2 bands (B3, B4, B8, B11)
+
+    Args:
+        data_path: Path to parquet file (e.g., "data_3x3/delta_table_2021_3x3.parquet")
+
+    Returns:
+        GeoDataFrame with columns: grid_id, lat, lon, vegetation, NDVI, EVI2, SAVI, NDBI, NDWI, MNDWI, etc.
+        Coordinates in WGS84 (EPSG:4326) for Plotly map projection compatibility.
+
+    Raises:
+        FileNotFoundError: If parquet file does not exist
+        KeyError: If required columns (.geo, B3, B4, B8, B11, tree_cover, etc.) are missing
+    """
+    # 1. Load entire dataset at full resolution (no pre-aggregation)
     df = pd.read_parquet(data_path)
 
-    # 2. Parse geometry from GeoJSON strings
+    # 2. Parse GeoJSON geometry strings into Shapely geometry objects
     df["geometry"] = pd.Series(
         [shape(json.loads(x)) for x in df[".geo"]],
         index=df.index,
         dtype="object",
     )
 
-    # 3. Build GeoDataFrame in projected CRS (meters)
+    # 3. Create GeoDataFrame using projected CRS (UTM Zone 32N for Nuremberg, Germany)
+    # UTM provides meter-based coordinates for accurate area calculations and grid operations
     gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:32632")
 
-    # 4. Create unique IDs and centroids for rendering (before CRS conversion for accuracy)
+    # 4. Assign unique IDs and compute centroids for rendering
     gdf["grid_id"] = gdf.index
     centroids = gdf.geometry.centroid
+
+    # 5. Convert to WGS84 (EPSG:4326) for Plotly map projection compatibility
     gdf = gdf.to_crs("EPSG:4326")
     centroids = centroids.to_crs("EPSG:4326")
+
+    # Extract latitude/longitude from centroids for point-based visualization
     gdf["lon"] = centroids.x
     gdf["lat"] = centroids.y
 
-    # Add vegetation target label
+    # 6. Aggregate vegetation sub-classes into single vegetation column
+    # ESA WorldCover classifies vegetation into: tree_cover, cropland, grassland
     gdf["vegetation"] = gdf[["tree_cover", "cropland", "grassland"]].sum(axis=1)
 
-    # Add engineered features
+    # 7. Compute spectral indices from Sentinel-2 bands for use in XGBoost model
+
+    # Normalized Difference Vegetation Index: measures vegetation greenness
     gdf["NDVI"] = (gdf["B8"] - gdf["B4"]) / (gdf["B8"] + gdf["B4"] + 1e-8)
+
+    # Enhanced Vegetation Index (2-band): more sensitive to vegetation than NDVI
     gdf["EVI2"] = 2.5 * (
         (gdf["B8"] - gdf["B4"]) / (gdf["B8"] + 2.4 * gdf["B4"] + 1 + 1e-8)
     )
+
+    # Soil-Adjusted Vegetation Index: reduces soil background effects
     gdf["SAVI"] = ((gdf["B8"] - gdf["B4"]) * 1.5) / (gdf["B8"] + gdf["B4"] + 0.5 + 1e-8)
+
+    # Normalized Difference Built-up Index: highlights built-up/urban areas
     gdf["NDBI"] = (gdf["B11"] - gdf["B8"]) / (gdf["B11"] + gdf["B8"] + 1e-8)
+
+    # Normalized Difference Water Index: identifies water bodies
     gdf["NDWI"] = (gdf["B3"] - gdf["B8"]) / (gdf["B3"] + gdf["B8"] + 1e-8)
+
+    # Modified Normalized Difference Water Index: alternative water detection
     gdf["MNDWI"] = (gdf["B3"] - gdf["B11"]) / (gdf["B3"] + gdf["B11"] + 1e-8)
 
     return gdf
 
 
-def map_class_to_string(cls: int):
+def map_class_to_string(cls: int) -> str:
+    """
+    Convert class index to human-readable label.
+
+    Args:
+        cls: Integer index (0, 1, or 2) corresponding to class_cols order
+
+    Returns:
+        Human-readable class name (e.g., "Built Up"), or "unclassified" if index invalid
+    """
     try:
-        return str.join(" ", class_cols[cls].lower().split("_")).title()
+        # Map class index to column name, then format as title case with spaces
+        return str.join(" ", CLASS_COLS[cls].lower().split("_")).title()
     except IndexError:
         return "unclassified"
 
@@ -830,7 +1132,24 @@ def assign_group_dominant_class(
     class_columns: list[str],
     group_columns: tuple[str, str] = ("grid_x", "grid_y"),
 ) -> pd.DataFrame:
-    """Assign one dominant class per grid group based on summed class scores."""
+    """
+    Assign one dominant class per grid group based on summed class scores.
+
+    Groups rows by grid coordinates and determines the class with highest sum within each group.
+    Adds "Dominant Class" column to output DataFrame.
+
+    Args:
+        df: Input DataFrame with class_columns and group_columns
+        class_columns: List of column names containing class scores (e.g., ["built_up", "vegetation", "water"])
+        group_columns: Column names to group by (default: grid coordinates)
+
+    Returns:
+        DataFrame with added "Dominant Class" column
+
+    Raises:
+        ValueError: If required columns are missing from input DataFrame
+    """
+    # Validate that all required columns exist
     missing_cols = [
         col for col in [*group_columns, *class_columns] if col not in df.columns
     ]
@@ -839,14 +1158,19 @@ def assign_group_dominant_class(
             f"Missing required columns for dominant class assignment: {missing_cols}"
         )
 
+    # Aggregate class scores by group (sum scores within each grid cell)
     grouped_scores = df.groupby(list(group_columns), dropna=False)[class_columns].sum()
+
+    # Find index of maximum score for each group
     dominant_idx = np.argmax(grouped_scores.to_numpy(), axis=1)
 
+    # Create result dataframe with group keys and dominant class label
     dominant_per_group = grouped_scores.reset_index()[list(group_columns)]
     dominant_per_group["Dominant Class"] = [
         map_class_to_string(idx) for idx in dominant_idx
     ]
 
+    # Merge dominant class back to original dataframe
     df_out = df.drop(columns=["Dominant Class"], errors="ignore").merge(
         dominant_per_group, on=list(group_columns), how="left"
     )
@@ -858,15 +1182,35 @@ def assign_row_dominant_class(
     class_columns: list[str],
     output_column: str = "Subgrid Dominant Class",
 ) -> pd.DataFrame:
-    """Assign dominant class for each individual row using per-row class scores."""
+    """
+    Assign dominant class for each individual row using per-row class scores.
+
+    Determines the class with highest score in each row (used for sub-grid level labels).
+    Adds specified output_column to DataFrame.
+
+    Args:
+        df: Input DataFrame with class_columns
+        class_columns: List of column names containing class scores
+        output_column: Name of column to add with dominant class labels (default: "Subgrid Dominant Class")
+
+    Returns:
+        DataFrame with added output_column containing dominant class labels
+
+    Raises:
+        ValueError: If required columns are missing from input DataFrame
+    """
+    # Validate required columns
     missing_cols = [col for col in class_columns if col not in df.columns]
     if missing_cols:
         raise ValueError(
             f"Missing required columns for row dominant class assignment: {missing_cols}"
         )
 
+    # Get class scores and find maximum for each row
     row_scores = df[class_columns].to_numpy()
     dominant_idx = np.argmax(row_scores, axis=1)
+
+    # Add dominant class column
     out = df.copy()
     out[output_column] = [map_class_to_string(idx) for idx in dominant_idx]
     return out
@@ -876,7 +1220,23 @@ def normalize_class_scores(
     df: pd.DataFrame,
     class_columns: list[str],
 ) -> pd.DataFrame:
-    """Normalize class score columns row-wise so they are non-negative and sum to 1."""
+    """
+    Normalize class score columns row-wise so they are non-negative and sum to 1.
+
+    Clips negative values to 0 and scales each row so class scores sum to 1.0 (100%).
+    Handles edge case where all scores are near-zero by assigning equal (1/n) weight.
+
+    Args:
+        df: Input DataFrame with class score columns
+        class_columns: Column names to normalize
+
+    Returns:
+        DataFrame with normalized class_columns (non-negative, row-wise sum = 1.0)
+
+    Raises:
+        ValueError: If required columns are missing from input DataFrame
+    """
+    # Validate required columns
     missing_cols = [col for col in class_columns if col not in df.columns]
     if missing_cols:
         raise ValueError(
@@ -884,62 +1244,145 @@ def normalize_class_scores(
         )
 
     out = df.copy()
+
+    # Extract scores as numpy array for efficient computation
     scores = out[class_columns].astype(float).to_numpy()
+
+    # Clip negative values to 0
     scores = np.clip(scores, a_min=0.0, a_max=None)
+
+    # Compute row sums and normalize
     row_sums = scores.sum(axis=1, keepdims=True)
 
-    # Keep rows stable even if model outputs all non-positive values.
+    # Handle rows where sum is near-zero (assign equal weight to all classes)
     zero_sum_mask = row_sums.squeeze(axis=1) <= 1e-12
     if np.any(zero_sum_mask):
         scores[zero_sum_mask] = 1.0 / len(class_columns)
         row_sums = scores.sum(axis=1, keepdims=True)
 
+    # Normalize: divide each score by row sum
     normalized = scores / row_sums
     out[class_columns] = normalized
     return out
 
 
-def load_prediction_model(model_path="artifacts/XGBoost_delta.pkl"):
+# ============================================================================
+# MODEL LOADING AND GLOBAL DATA INITIALIZATION
+# ============================================================================
+
+
+def load_prediction_model(
+    model_path: str = "artifacts/XGBoost_delta.pkl",
+) -> object | None:
+    """
+    Load XGBoost prediction model from pickle file.
+
+    Attempts to load a pre-trained XGBoost model (presumably trained to predict
+    land-cover deltas between years). Used for forecasting future land-cover
+    compositions.
+
+    Args:
+        model_path: Path to pickled model file (default: "artifacts/XGBoost_delta.pkl")
+
+    Returns:
+        Loaded model object, or None if file not found or loading fails.
+        Silently returns None on errors (model is optional; app can still run without it).
+    """
     model_file = Path(model_path)
+
+    # Return None if model file doesn't exist
     if not model_file.exists():
         return None
 
-    with model_file.open("rb") as f:
-        return pickle.load(f)
+    try:
+        with model_file.open("rb") as f:
+            return pickle.load(f)
+    except Exception as e:
+        print(f"Failed to load prediction model from {model_path}: {e}")
+        return None
 
 
+# Load model at module initialization
 prediction_model = load_prediction_model()
 
+# Load satellite data at module initialization
 try:
     gdf = load_data_from_csv("data_3x3/delta_table_2021_3x3.parquet")
 except Exception as e:
     print(f"Error loading data: {e}")
-    import traceback
-
     traceback.print_exc()
     gdf = None
 
 
-color_map = {
-    "Tree Cover": "#006400",
-    "Vegetation": "#006400",
-    "Shrubland": "#ffbb22",
-    "Grassland": "#ffff4c",
-    "Cropland": "#f096ff",
-    "Built Up": "#fa0000",
-    "Bare / Sparse veg.": "#b4b4b4",
-    "Snow and Ice": "#f0f0f0",
-    "Water": "#0064ff",
-    "Permanent Water": "#0064ff",
-    "Herbaceous wetland": "#0096a0",
-    "Mangroves": "#00cf75",
-    "Moss and Lichen": "#fae6a0",
-    "unclassified": "#2c3e50",
+# Comprehensive color mapping for all potential land-cover classes
+# Used for consistent color assignment across all visualizations
+COLOR_MAP: dict[str, str] = {
+    "Tree Cover": "#006400",  # Dark green
+    "Vegetation": "#006400",  # Dark green
+    "Shrubland": "#ffbb22",  # Golden yellow
+    "Grassland": "#ffff4c",  # Bright yellow
+    "Cropland": "#f096ff",  # Magenta
+    "Built Up": "#fa0000",  # Red
+    "Bare / Sparse veg.": "#b4b4b4",  # Gray
+    "Snow and Ice": "#f0f0f0",  # Light gray
+    "Water": "#0064ff",  # Blue
+    "Permanent Water": "#0064ff",  # Blue
+    "Herbaceous wetland": "#0096a0",  # Teal
+    "Mangroves": "#00cf75",  # Bright green
+    "Moss and Lichen": "#fae6a0",  # Pale yellow
+    "unclassified": "#2c3e50",  # Dark blue-gray
 }
 
 
-def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_size):
-    """Build two maps: selected year (delta=0) and future (delta=time_delta)."""
+# ============================================================================
+# MAIN DASHBOARD COMPUTATION PIPELINE
+# ============================================================================
+
+
+def update_dashboard(
+    start_year: int,
+    time_delta: int,
+    map_type: str,
+    render_mode: str,
+    grid_cell_size: int,
+) -> tuple[go.Figure | None, go.Figure | None, go.Figure]:
+    """
+    Build two synchronized maps showing selected year and future predictions.
+
+    Main entry point for dashboard computation. Orchestrates the entire pipeline:
+    1. Filter base data by selected year (using inverted delta logic)
+    2. Create grid cells at specified resolution
+    3. Build or predict land-cover classifications
+    4. Generate map visualizations with confidence metrics
+    5. Compute borough-level composition changes
+    6. Cache results for downstream selection interactions
+
+    The delta calculation uses inverted logic: delta_selection = 2021 - start_year
+    This is necessary because all data is sourced from a 2021 parquet file:
+    - start_year=2021 → delta_selection=0 (use actual 2021 data)
+    - start_year=2020 → delta_selection=1 (predict back to 2020)
+    - start_year=2016 → delta_selection=5 (predict back to 2016)
+
+    Args:
+        start_year: Base year for visualization (2016-2021)
+        time_delta: Years ahead to predict (0-4)
+        map_type: Map style for Plotly (e.g., "carto-voyager" or "satellite-streets")
+        render_mode: Either "points" (scatter) or "polygons" (choropleth) for grid rendering
+        grid_cell_size: Grid cell size in meters (20-200m)
+
+    Returns:
+        Tuple of (selected_map_fig, future_map_fig, borough_change_fig) where:
+        - selected_map_fig: Plotly map showing selected year land-cover
+        - future_map_fig: Plotly map showing predicted future land-cover
+        - borough_change_fig: Stacked bar chart of borough-level changes
+
+        Returns (None, None, empty_figure) if base data unavailable.
+
+    Side Effects:
+        Updates global caches: LAST_GRID_TABLES, LAST_SUBGRID_TABLES,
+        LAST_BOROUGH_CHANGE_FIG, LAST_MAP_FIGURES
+    """
+    # Validate base data availability
     if gdf is None:
         return (
             None,
@@ -947,19 +1390,23 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             build_empty_borough_change_plot("No grid data available yet."),
         )
 
+    # Convert parameters to integers for safety
     start_year = int(start_year)
     time_delta = int(time_delta)
     grid_cell_size = int(grid_cell_size)
+
+    # Set random seed for reproducibility of any stochastic operations
     np.random.seed(start_year)
 
-    # Select the rows from the selected data
-    # This is a bit weird since all the data is coming from a CSV oriented
-    # around 2021, so delta of 0 is 2021, 1 is 2020, etc.
+    # Calculate delta for data filtering using inverted delta logic
+    # (All data sourced from 2021, so delta=0 means 2021, delta=1 means 2020, etc.)
     delta_selection = 2021 - start_year
 
+    # Filter base data to rows matching the selected year's delta
     base_df = gdf[gdf["delta_years"].astype(int) == delta_selection].copy()
 
-    # Calculate grid coordinates once for all aggregations
+    # Compute grid cell coordinates for all data points
+    # Each point is assigned to its containing grid cell based on grid_cell_size
     base_df["grid_x"] = (
         np.floor(base_df["x"] / grid_cell_size) * grid_cell_size
     ).astype(int)
@@ -967,19 +1414,32 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         np.floor(base_df["y"] / grid_cell_size) * grid_cell_size
     ).astype(int)
 
-    # Build stable grid metadata once; geometry/GeoJSON is created lazily for polygons.
+    # Create stable grid metadata (unique grid cells and assigned IDs)
+    # Grid geometry is created lazily only when needed for choropleth rendering
     grid_metadata = (
         base_df[["delta_years", "grid_x", "grid_y"]]
         .drop_duplicates()
         .reset_index(drop=True)
     )
     grid_metadata["grid_id"] = np.arange(len(grid_metadata), dtype=int)
+
+    # Lazy-loaded GeoJSON for choropleth mode (created only when render_mode="polygons")
     plotly_geojson = None
 
-    def get_plotly_geojson():
+    def get_plotly_geojson() -> dict:
+        """
+        Generate GeoJSON representation of grid cells for choropleth mapping.
+
+        Creates rectangular polygons in projected CRS, then converts to WGS84 for
+        Plotly compatibility. Cached on first call to avoid expensive recomputation.
+
+        Returns:
+            GeoJSON dict mapping grid_ids to polygon geometries
+        """
         nonlocal plotly_geojson
         if plotly_geojson is None:
             grid_with_geometry = grid_metadata.copy()
+            # Create bounding box polygons for each grid cell
             grid_with_geometry["geometry"] = grid_with_geometry.apply(
                 lambda row: box(
                     row["grid_x"],
@@ -992,15 +1452,20 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             display_grid_gdf = gpd.GeoDataFrame(
                 grid_with_geometry, geometry="geometry", crs="EPSG:32632"
             )
+            # Convert to WGS84 for Plotly projection compatibility
             display_grid_gdf = display_grid_gdf.to_crs("EPSG:4326")
             plotly_geojson = json.loads(display_grid_gdf.to_json())
         return plotly_geojson
 
+    # Extract feature names from prediction model
+    # Attempts to find feature names from either the model directly or from its sub-estimators
     feature_names = None
     if prediction_model is not None:
         feature_names = None
+        # Try to get feature names from primary model attribute (sklearn models)
         if hasattr(prediction_model, "feature_names_in_"):
             feature_names = prediction_model.feature_names_in_.tolist()
+        # Fallback: try to get from first estimator if model is an ensemble
         elif (
             hasattr(prediction_model, "estimators_")
             and len(prediction_model.estimators_) > 0
@@ -1009,14 +1474,31 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             feature_names = prediction_model.estimators_[0].feature_names_in_.tolist()
 
     def build_predicted_df(prediction_delta: int) -> pd.DataFrame:
+        """
+        Generate predictions and dominant class labels for a future time point.
+
+        Creates a copy of base data with updated delta_years, runs XGBoost predictions
+        if available, normalizes outputs, and assigns dominant classes at both row
+        and group levels.
+
+        Args:
+            prediction_delta: Delta value for future year (0-4)
+
+        Returns:
+            DataFrame with predicted CLASS_COLS, dominant class labels, and metadata
+        """
         df_out = base_df.copy()
         df_out["delta_years"] = prediction_delta
 
+        # Run model predictions if model and features are available
         if prediction_model is not None and feature_names is not None:
+            # Check for missing features before prediction
             missing_features = [
                 name for name in feature_names if name not in df_out.columns
             ]
+            # Only proceed if all required features are present
             if not missing_features:
+                # Suppress XGBoost warning about GPU/CUDA device fallback
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
                         "ignore",
@@ -1024,21 +1506,40 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
                         message=".*Falling back to prediction using DMatrix.*",
                     )
                     predicted_targets = prediction_model.predict(df_out[feature_names])
+
+                # Convert predictions to DataFrame with class column names
                 predicted_targets_df = pd.DataFrame(
-                    predicted_targets, index=df_out.index, columns=class_cols
+                    predicted_targets, index=df_out.index, columns=CLASS_COLS
                 )
+                # Normalize predictions to sum to 1.0 per row
                 predicted_targets_df = normalize_class_scores(
                     predicted_targets_df,
-                    class_cols,
+                    CLASS_COLS,
                 )
-                df_out[class_cols] = predicted_targets_df[class_cols]
+                # Replace original class scores with normalized predictions
+                df_out[CLASS_COLS] = predicted_targets_df[CLASS_COLS]
 
-        df_out = assign_row_dominant_class(df_out, class_cols)
-        df_out = assign_group_dominant_class(df_out, class_cols)
+        # Assign dominant classes at row and group levels
+        df_out = assign_row_dominant_class(df_out, CLASS_COLS)
+        df_out = assign_group_dominant_class(df_out, CLASS_COLS)
+        # Parent dominant class (grid-level) matches group dominant class
         df_out["Parent Dominant Class"] = df_out["Dominant Class"]
         return df_out
 
     def build_subgrid_table(df_in: pd.DataFrame) -> pd.DataFrame:
+        """
+        Build sub-grid level output table with all required columns and metadata.
+
+        Joins sub-grid level data with parent grid metadata, ensures all columns
+        are present, and formats for downstream consumption.
+
+        Args:
+            df_in: Input DataFrame with grid/subgrid data and class scores
+
+        Returns:
+            DataFrame with columns from SUBGRID_COLUMNS
+        """
+        # Merge with grid metadata to assign parent_grid_id
         subgrid_df = df_in.merge(
             grid_metadata[["grid_x", "grid_y", "grid_id"]],
             on=["grid_x", "grid_y"],
@@ -1046,7 +1547,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             validate="many_to_one",
         ).rename(columns={"grid_id_x": "subgrid_id", "grid_id_y": "parent_grid_id"})
 
-        # Backfill for compatibility if a prior path did not create both columns.
+        # Backfill missing dominant class columns for compatibility
         if (
             "Parent Dominant Class" not in subgrid_df.columns
             and "Dominant Class" in subgrid_df.columns
@@ -1055,27 +1556,44 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         if "Subgrid Dominant Class" not in subgrid_df.columns:
             subgrid_df = assign_row_dominant_class(
                 subgrid_df,
-                class_cols,
+                CLASS_COLS,
                 output_column="Subgrid Dominant Class",
             )
 
+        # Ensure all expected columns are present (fill with NaN if missing)
         for col in SUBGRID_COLUMNS:
             if col not in subgrid_df.columns:
                 subgrid_df[col] = np.nan
 
+        # Return only required columns in proper order
         return subgrid_df[SUBGRID_COLUMNS].copy()
 
-    def build_map(df_in: pd.DataFrame):
-        # Aggregate sub-grid predictions into parent-grid scores, then compute dominant class/confidence.
+    def build_map(df_in: pd.DataFrame) -> tuple[go.Figure, pd.DataFrame]:
+        """
+        Build interactive Plotly map with grid cells and metadata.
+
+        Aggregates sub-grid predictions to parent grid level, computes confidence
+        estimates, performs spatial join to boroughs, and creates Plotly visualization.
+
+        Args:
+            df_in: Sub-grid level DataFrame with CLASS_COLS scores
+
+        Returns:
+            Tuple of (Plotly figure, grid-level output DataFrame)
+        """
+        # Aggregate class scores by grid cell (parent grid level)
         grouped_scores = df_in.groupby(["grid_x", "grid_y"], as_index=False)[
-            class_cols
+            CLASS_COLS
         ].sum()
         grid_df = grouped_scores.copy()
 
-        dominant_idx = np.argmax(grid_df[class_cols].to_numpy(), axis=1)
+        # Assign dominant class at grid level
+        dominant_idx = np.argmax(grid_df[CLASS_COLS].to_numpy(), axis=1)
         grid_df["Dominant Class"] = [map_class_to_string(idx) for idx in dominant_idx]
 
-        score_matrix = grid_df[class_cols].to_numpy()
+        # Compute confidence as percentage of dominant class
+        # Confidence ranges from 50% (all classes equal) to 100% (single class dominates)
+        score_matrix = grid_df[CLASS_COLS].to_numpy()
         dominant_values = score_matrix[np.arange(len(grid_df)), dominant_idx]
         total_values = score_matrix.sum(axis=1)
         dominant_pct = np.where(
@@ -1083,6 +1601,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             (dominant_values / total_values) * 100.0,
             50.0,
         )
+        # Confidence categories (Low: 50-66%, Medium: 66-83%, High: 83-100%)
         clipped_pct = np.clip(dominant_pct, 50.0, 100.0)
         grid_df["Confidence"] = np.where(
             clipped_pct < (50.0 + (50.0 / 3.0)),
@@ -1094,7 +1613,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             ),
         )
 
-        # Use average lat/lon for representative point rendering.
+        # Compute average lat/lon for each grid cell (used for point rendering)
         lat_lon_df = (
             df_in.groupby(["grid_x", "grid_y"], as_index=False)[["lat", "lon"]]
             .mean()
@@ -1107,6 +1626,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             validate="one_to_one",
         )
 
+        # Merge with grid metadata to get grid_id
         grid_df = grid_df.merge(
             grid_metadata[["grid_x", "grid_y", "grid_id"]],
             on=["grid_x", "grid_y"],
@@ -1114,6 +1634,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             validate="one_to_one",
         )
 
+        # Perform spatial join to borough polygons
         boundaries = BOROUGH_BOUNDARIES_GDF
         if boundaries is not None and not boundaries.empty:
             points_gdf = gpd.GeoDataFrame(
@@ -1132,23 +1653,24 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         else:
             grid_df["Borough"] = "Unassigned"
 
+        # Create Plotly visualization based on render mode
         if render_mode == "points":
-            # Scatter map with aggregated points at grid cell resolution
+            # Scatter map mode: fast rendering with point markers
             fig = px.scatter_map(
                 grid_df,
                 lat="lat",
                 lon="lon",
                 color="Dominant Class",
                 custom_data=["grid_id", "Dominant Class", "Confidence", "Borough"],
-                color_discrete_map=color_map,
+                color_discrete_map=COLOR_MAP,
                 hover_name=None,
                 hover_data={"grid_id": False, "lat": False, "lon": False},
                 zoom=11,
-                center={"lat": lat_center, "lon": lon_center},
+                center={"lat": LAT_CENTER, "lon": LON_CENTER},
                 map_style=map_type,
             )
         else:
-            # Choropleth map with polygon grid cells
+            # Choropleth map mode: detailed polygon rendering at grid resolution
             fig = px.choropleth_map(
                 grid_df,
                 geojson=get_plotly_geojson(),
@@ -1156,13 +1678,15 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
                 featureidkey="properties.grid_id",
                 color="Dominant Class",
                 custom_data=["grid_id", "Dominant Class", "Confidence", "Borough"],
-                color_discrete_map=color_map,
+                color_discrete_map=COLOR_MAP,
                 hover_name=None,
                 hover_data={"grid_id": False},
                 zoom=11,
-                center={"lat": lat_center, "lon": lon_center},
+                center={"lat": LAT_CENTER, "lon": LON_CENTER},
                 map_style=map_type,
             )
+
+        # Apply consistent layout styling
         fig.update_layout(
             coloraxis_showscale=False,
             legend=dict(
@@ -1182,10 +1706,13 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
                 color="black",
                 activecolor="#0078A8",
             ),
-            clickmode="event+select",
+            clickmode="event+select",  # Enable box select and click events
             height=700,
         )
+
+        # Apply trace-specific styling
         if render_mode == "points":
+            # Point markers: semi-transparent, hide when unselected
             fig.update_traces(
                 hovertemplate="Dominant Class: %{customdata[1]}<br>Confidence: %{customdata[2]}<extra></extra>",
                 marker=dict(size=5, opacity=0.4),
@@ -1193,47 +1720,64 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
                 unselected=dict(marker=dict(opacity=0.0)),
             )
         else:
+            # Polygon markers: semi-transparent fill, hide background when unselected
             fig.update_traces(
                 hovertemplate="Dominant Class: %{customdata[1]}<br>Confidence: %{customdata[2]}<extra></extra>",
                 marker=dict(opacity=0.3),
                 selected=dict(marker=dict(opacity=0.3)),
                 unselected=dict(marker=dict(opacity=0.0)),
             )
+
         return fig, grid_df
 
+    # Build prediction dataframes for selected year and future prediction
     if delta_selection == 0:
+        # If selected year is 2021 (delta=0), use actual data for selected year
+        # and predictions only for future
         predicted_dfs = [
-            assign_group_dominant_class(base_df.copy(), class_cols),
+            assign_group_dominant_class(base_df.copy(), CLASS_COLS),
             build_predicted_df(prediction_delta=time_delta),
         ]
     else:
+        # If selected year is historical, predict both selected year and future
         predicted_dfs = [
-            build_predicted_df(prediction_delta=d) for d in [0, time_delta]
+            build_predicted_df(prediction_delta=0),
+            build_predicted_df(prediction_delta=time_delta),
         ]
+
+    # Build both maps and extract grid-level aggregates
     (selected_fig, selected_grid_df), (future_fig, future_grid_df) = [
         build_map(df_item) for df_item in predicted_dfs
     ]
 
+    # Update global caches for downstream interaction handlers
     global \
         LAST_GRID_TABLES, \
         LAST_SUBGRID_TABLES, \
         LAST_BOROUGH_CHANGE_FIG, \
         LAST_MAP_FIGURES
+
     LAST_GRID_TABLES = {
         "selected_year": selected_grid_df[SELECTION_COLUMNS].copy(),
         "future_prediction": future_grid_df[SELECTION_COLUMNS].copy(),
     }
+
+    # Build sub-grid tables for composition analysis
     selected_subgrid = build_subgrid_table(predicted_dfs[0])
     future_subgrid = build_subgrid_table(predicted_dfs[1])
     LAST_SUBGRID_TABLES = {
         "selected_year": selected_subgrid,
         "future_prediction": future_subgrid,
     }
+
+    # Build borough-level composition change chart
     borough_change_fig = build_top_changed_boroughs_chart(
         selected_subgrid,
         future_subgrid,
     )
     LAST_BOROUGH_CHANGE_FIG = borough_change_fig
+
+    # Cache map figures for deselect operations
     LAST_MAP_FIGURES = {
         "selected_year": go.Figure(selected_fig),
         "future_prediction": go.Figure(future_fig),
@@ -1274,18 +1818,32 @@ def selection_payload_to_outputs(payload: dict | None):
         )
 
     def build_land_cover_composition(subgrid_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Aggregate sub-grid land-cover composition into percentage breakdown.
+
+        Sums class scores across all sub-grids within selection and converts to
+        percentages for human-readable composition display.
+
+        Args:
+            subgrid_df: Sub-grid level data with CLASS_COLS scores
+
+        Returns:
+            DataFrame with columns: class (label), value (sum), percent (%)
+        """
         if subgrid_df.empty:
             return pd.DataFrame(columns=["class", "value", "percent"])
 
-        values = subgrid_df[class_cols].sum(axis=0).clip(lower=0)
+        # Sum class scores across all selected sub-grids
+        values = subgrid_df[CLASS_COLS].sum(axis=0).clip(lower=0)
         total = float(values.sum())
         if total <= 0:
             return pd.DataFrame(columns=["class", "value", "percent"])
 
+        # Build composition DataFrame with human-readable labels
         comp_df = pd.DataFrame(
             {
-                "class": [LAND_COVER_LABELS[col] for col in class_cols],
-                "value": [float(values[col]) for col in class_cols],
+                "class": [LAND_COVER_LABELS[col] for col in CLASS_COLS],
+                "value": [float(values[col]) for col in CLASS_COLS],
             }
         )
         comp_df["percent"] = (comp_df["value"] / total) * 100.0
@@ -1521,21 +2079,52 @@ def selection_payload_to_outputs(payload: dict | None):
     )
 
 
-def reset_selection_insights():
+def reset_selection_insights() -> tuple:
+    """
+    Reset selection state by clearing all composition analysis plots.
+
+    Called when user needs to see default empty state. Simply delegates to
+    `selection_payload_to_outputs` with None payload.
+
+    Returns:
+        Tuple of all secondary plot outputs (pies, delta, borough chart) in empty state.
+    """
     return selection_payload_to_outputs(None)
 
 
-def clear_selection_without_recompute():
-    def clear_selectedpoints(fig: go.Figure | None):
+def clear_selection_without_recompute() -> tuple:
+    """
+    Clear grid selection on maps without recomputing dashboard or regenerating data.
+
+    Used by Deselect button: clears selectedPoints from both maps and resets secondary
+    plots to empty state. More efficient than full re-submission as it uses cached
+    map figures.
+
+    Returns:
+        Tuple of map updates, selection summary, and secondary plots in empty state.
+    """
+
+    def clear_selectedpoints(fig: go.Figure | None) -> dict:
+        """
+        Clear selected points from a Plotly figure.
+
+        Args:
+            fig: Plotly figure or None
+
+        Returns:
+            Gradio update object (dict)
+        """
         if fig is None:
             return gr.update()
         fig_out = go.Figure(fig)
         fig_out.update_traces(selectedpoints=None)
         return gr.update(value=fig_out)
 
+    # Clear selections from both cached maps
     left_map_update = clear_selectedpoints(LAST_MAP_FIGURES.get("selected_year"))
     right_map_update = clear_selectedpoints(LAST_MAP_FIGURES.get("future_prediction"))
 
+    # Reset all secondary plots to empty state
     summary, selected_pie_update, future_pie_update, delta_update, borough_update = (
         selection_payload_to_outputs({"event_kind": "deselect", "grid_ids": []})
     )
@@ -1552,9 +2141,23 @@ def clear_selection_without_recompute():
     )
 
 
-def build_map_titles(start_year, time_delta):
+def build_map_titles(start_year: int, time_delta: int) -> tuple[str, str]:
+    """
+    Generate descriptive titles for selected year and future prediction maps.
+
+    Indicates whether the selected year map shows true labels (2021) or predictions (historical years).
+
+    Args:
+        start_year: Selected year for visualization
+        time_delta: Prediction horizon in years
+
+    Returns:
+        Tuple of (selected_year_title, future_year_title) as markdown-formatted strings
+    """
     start_year = int(start_year)
     time_delta = int(time_delta)
+
+    # Only 2021 has true/validated labels; all other years are predictions
     selected_year_label_type = (
         "True Labels" if start_year == 2021 else "Predicted Labels"
     )
@@ -1564,12 +2167,27 @@ def build_map_titles(start_year, time_delta):
 
 
 def update_dashboard_with_titles(
-    start_year,
-    time_delta,
-    map_type,
-    render_mode,
-    grid_cell_size,
-):
+    start_year: int,
+    time_delta: int,
+    map_type: str,
+    render_mode: str,
+    grid_cell_size: int,
+) -> tuple[go.Figure | None, go.Figure | None, go.Figure, str, str]:
+    """
+    Wrapper around update_dashboard that generates map titles.
+
+    Calls update_dashboard and then builds corresponding titles based on selected year.
+
+    Args:
+        start_year: Selected year for visualization
+        time_delta: Prediction horizon in years
+        map_type: Map style (carto-voyager, satellite-streets, etc.)
+        render_mode: Rendering mode (points or polygons)
+        grid_cell_size: Grid resolution in meters
+
+    Returns:
+        Tuple of (selected_fig, future_fig, borough_fig, left_title, right_title)
+    """
     selected_fig, future_fig, borough_change_fig = update_dashboard(
         start_year=start_year,
         time_delta=time_delta,
@@ -1582,15 +2200,36 @@ def update_dashboard_with_titles(
 
 
 def submit_all_outputs(
-    start_year,
-    time_delta,
-    map_type,
-    render_mode,
-    grid_cell_size,
-):
+    start_year: int,
+    time_delta: int,
+    map_type: str,
+    render_mode: str,
+    grid_cell_size: int,
+) -> tuple:
+    """
+    Process Submit button click and generate all dashboard outputs.
+
+    Main entry point from Gradio UI called on form submission. Updates dashboard
+    computation, resets selection state to empty, and returns all visualizations
+    and metadata for display.
+
+    Args:
+        start_year: Selected year for visualization (2016-2021)
+        time_delta: Prediction horizon in years (0-4)
+        map_type: Map style (carto-voyager, satellite-streets, etc.)
+        render_mode: Rendering mode (points or polygons)
+        grid_cell_size: Grid resolution in meters (20-200)
+
+    Returns:
+        Tuple of all Gradio outputs in order:
+        (selected_map, future_map, selected_title, future_title, selection_bridge,
+         summary, selected_pie, future_pie, delta_plot, borough_chart)
+    """
     global LAST_SUBMIT_TS_MS
+    # Record timestamp for event guard (filters stale re-render events from Plotly)
     LAST_SUBMIT_TS_MS = int(time.time() * 1000)
 
+    # Update dashboard and get all visualizations with titles
     selected_fig, future_fig, borough_change_fig, left_title, right_title = (
         update_dashboard_with_titles(
             start_year=start_year,
@@ -1600,6 +2239,8 @@ def submit_all_outputs(
             grid_cell_size=grid_cell_size,
         )
     )
+
+    # Initialize secondary plots with default (empty selection) state
     summary = DEFAULT_SELECTION_MESSAGE
     selected_pie_update = gr.update(
         value=build_empty_pie("Selected Year Composition", "Waiting for selection"),
@@ -1616,6 +2257,7 @@ def submit_all_outputs(
         visible="hidden",
     )
     borough_update = gr.update(value=borough_change_fig, visible=True)
+
     return (
         selected_fig,
         future_fig,
