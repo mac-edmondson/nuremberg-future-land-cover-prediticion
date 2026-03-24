@@ -17,6 +17,7 @@ dependencies = [
     "osmnx>=2.1.0",
     "pandas>=3.0.1",
     "plotly>=6.6.0",
+    "pyarrow>=23.0.1",
     "scikit-learn==1.7.2",
     "seaborn>=0.13.2",
     "shapely>=2.1.2",

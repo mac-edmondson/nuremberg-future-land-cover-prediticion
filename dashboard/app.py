@@ -1,5 +1,7 @@
 import json
 import pickle
+import time
+import warnings
 from pathlib import Path
 
 import geopandas as gpd
@@ -9,6 +11,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 from plotly.subplots import make_subplots
 from shapely.geometry import box, shape
 
@@ -69,6 +72,314 @@ LAND_COVER_COLORS = {
 
 DEFAULT_SELECTION_MESSAGE = "Select a region to compare land-cover composition between selected year and future prediction."
 
+NURNBERG_BOROUGH_NAMES = [
+    "Altstadt und engere Innenstadt",
+    "Weiterer Innenstadtgürtel Süd",
+    "Östliche Außenstadt",
+    "Nordöstliche Außenstadt",
+    "Nordwestliche Außenstadt",
+    "Westliche Außenstadt",
+    "Südwestliche Außenstadt",
+    "Südliche Außenstadt",
+    "Südöstliche Außenstadt",
+    "Weiterer Innenstadtgürtel West/Nord/Ost",
+]
+
+LAST_BOROUGH_CHANGE_FIG = None
+LAST_MAP_FIGURES: dict[str, go.Figure | None] = {
+    "selected_year": None,
+    "future_prediction": None,
+}
+LAST_SUBMIT_TS_MS = 0
+SELECTION_EVENT_GUARD_MS = 900
+
+
+def build_empty_borough_change_plot(message: str) -> go.Figure:
+    fig = go.Figure()
+    fig.update_layout(
+        title="Borough Change Overview",
+        height=340,
+        margin={"r": 20, "t": 60, "l": 20, "b": 20},
+        annotations=[
+            {
+                "text": message,
+                "x": 0.5,
+                "y": 0.5,
+                "xref": "paper",
+                "yref": "paper",
+                "showarrow": False,
+                "font": {"size": 14},
+            }
+        ],
+    )
+    return fig
+
+
+def build_empty_pie(title: str, message: str) -> go.Figure:
+    fig = go.Figure()
+    fig.update_layout(
+        title=title,
+        height=340,
+        margin={"r": 10, "t": 50, "l": 10, "b": 10},
+        annotations=[
+            {
+                "text": message,
+                "x": 0.5,
+                "y": 0.5,
+                "xref": "paper",
+                "yref": "paper",
+                "showarrow": False,
+                "font": {"size": 14},
+            }
+        ],
+    )
+    return fig
+
+
+def build_empty_delta(title: str, message: str) -> go.Figure:
+    fig = go.Figure()
+    fig.update_layout(
+        title=title,
+        height=290,
+        margin={"r": 30, "t": 50, "l": 30, "b": 30},
+        xaxis_title="Delta (%)",
+        yaxis_title="Land Cover",
+        annotations=[
+            {
+                "text": message,
+                "x": 0.5,
+                "y": 0.5,
+                "xref": "paper",
+                "yref": "paper",
+                "showarrow": False,
+                "font": {"size": 14},
+            }
+        ],
+    )
+    return fig
+
+
+def load_nuremberg_borough_boundaries() -> gpd.GeoDataFrame | None:
+    """Load 10 Nuremberg borough polygons from OSM Nominatim search results."""
+    features = []
+    headers = {"User-Agent": "nuremberg-land-cover-dashboard/1.0"}
+    url = "https://nominatim.openstreetmap.org/search"
+
+    for borough in NURNBERG_BOROUGH_NAMES:
+        try:
+            response = requests.get(
+                url,
+                params={
+                    "q": f"{borough}, Nürnberg, Bayern, Deutschland",
+                    "format": "jsonv2",
+                    "polygon_geojson": 1,
+                    "limit": 1,
+                },
+                headers=headers,
+                timeout=45,
+            )
+            response.raise_for_status()
+            records = response.json()
+            if not records:
+                continue
+            geojson = records[0].get("geojson")
+            if not geojson:
+                continue
+            geom = shape(geojson)
+            features.append({"borough": borough, "geometry": geom})
+        except Exception as err:
+            print(f"Borough boundary lookup failed for '{borough}': {err}")
+
+    if len(features) < 10:
+        print(
+            f"Warning: loaded {len(features)} borough boundaries out of {len(NURNBERG_BOROUGH_NAMES)}."
+        )
+
+    if not features:
+        return None
+
+    return gpd.GeoDataFrame(features, geometry="geometry", crs="EPSG:4326")
+
+
+BOROUGH_BOUNDARIES_GDF = load_nuremberg_borough_boundaries()
+
+
+def calculate_borough_bounds() -> dict[str, dict]:
+    """Calculate lat/lon bounds for each borough from BOROUGH_BOUNDARIES_GDF.
+
+    Returns:
+        Dictionary mapping borough names to {min_lat, max_lat, min_lon, max_lon, center_lat, center_lon, zoom}
+    """
+    bounds = {}
+    if BOROUGH_BOUNDARIES_GDF is None or BOROUGH_BOUNDARIES_GDF.empty:
+        return bounds
+
+    for _, row in BOROUGH_BOUNDARIES_GDF.iterrows():
+        borough_name = row["borough"]
+        geom = row["geometry"]
+        minx, miny, maxx, maxy = geom.bounds  # (lon_min, lat_min, lon_max, lat_max)
+
+        center_lon = (minx + maxx) / 2
+        center_lat = (miny + maxy) / 2
+
+        # Calculate zoom level based on borough size
+        # Smaller bounds = higher zoom
+        lon_span = maxx - minx
+        lat_span = maxy - miny
+        max_span = max(lon_span, lat_span)
+        # Empirical formula for Plotly zoom levels
+        zoom = max(11, min(14, int(14 - (max_span * 100))))
+
+        bounds[borough_name] = {
+            "min_lat": float(miny),
+            "max_lat": float(maxy),
+            "min_lon": float(minx),
+            "max_lon": float(maxx),
+            "center_lat": float(center_lat),
+            "center_lon": float(center_lon),
+            "zoom": zoom,
+        }
+
+    return bounds
+
+
+def build_top_changed_boroughs_chart(
+    selected_subgrid_df: pd.DataFrame,
+    future_subgrid_df: pd.DataFrame,
+) -> go.Figure:
+    if selected_subgrid_df.empty or future_subgrid_df.empty:
+        return build_empty_borough_change_plot("No grid data available yet.")
+
+    boundaries = BOROUGH_BOUNDARIES_GDF
+    if boundaries is None or boundaries.empty:
+        return build_empty_borough_change_plot("Borough boundaries are not available.")
+
+    def attach_boroughs_to_subgrid(grid_df: pd.DataFrame) -> pd.DataFrame:
+        points_gdf = gpd.GeoDataFrame(
+            grid_df[["lat", "lon", *class_cols]].copy(),
+            geometry=gpd.points_from_xy(grid_df["lon"], grid_df["lat"]),
+            crs="EPSG:4326",
+            index=grid_df.index,
+        )
+        joined = gpd.sjoin(
+            points_gdf,
+            boundaries[["borough", "geometry"]],
+            how="left",
+            predicate="intersects",
+        )
+        out = joined.drop(columns=["geometry", "index_right"], errors="ignore")
+        out["borough"] = out["borough"].fillna("Unassigned")
+        return out
+
+    selected_with_borough = attach_boroughs_to_subgrid(selected_subgrid_df)
+    future_with_borough = attach_boroughs_to_subgrid(future_subgrid_df)
+
+    selected_scores = selected_with_borough.groupby("borough", as_index=False)[
+        class_cols
+    ].sum()
+    future_scores = future_with_borough.groupby("borough", as_index=False)[
+        class_cols
+    ].sum()
+
+    # Convert borough-level sums into percentages so changes are comparable.
+    def to_percent(df_scores: pd.DataFrame) -> pd.DataFrame:
+        out = df_scores.copy()
+        sums = out[class_cols].sum(axis=1)
+        for col in class_cols:
+            out[col] = np.where(sums > 1e-12, (out[col] / sums) * 100.0, 0.0)
+        return out
+
+    selected_pct = to_percent(selected_scores).rename(
+        columns={c: f"{c}_selected" for c in class_cols}
+    )
+    future_pct = to_percent(future_scores).rename(
+        columns={c: f"{c}_future" for c in class_cols}
+    )
+
+    merged = selected_pct.merge(future_pct, on="borough", how="outer")
+    if merged.empty:
+        return build_empty_borough_change_plot("No borough stats available.")
+
+    for col in class_cols:
+        merged[f"{col}_selected"] = merged[f"{col}_selected"].fillna(0.0)
+        merged[f"{col}_future"] = merged[f"{col}_future"].fillna(0.0)
+
+    for col in class_cols:
+        delta_col = f"{col}_delta_pp"
+        merged[delta_col] = merged[f"{col}_future"] - merged[f"{col}_selected"]
+        merged[f"{col}_positive_delta_pp"] = merged[delta_col].clip(lower=0.0)
+
+    positive_cols = [f"{col}_positive_delta_pp" for col in class_cols]
+    full = pd.DataFrame({"borough": NURNBERG_BOROUGH_NAMES}).merge(
+        merged[["borough", *positive_cols]],
+        on="borough",
+        how="left",
+    )
+    for col in positive_cols:
+        full[col] = full[col].fillna(0.0)
+
+    if full.empty:
+        return build_empty_borough_change_plot("No borough change values available.")
+
+    class_label_map = {
+        "built_up": "Built Up",
+        "vegetation": "Vegetation",
+        "water": "Water",
+    }
+    class_color_map = {
+        "Built Up": color_map.get("Built Up", "#fa0000"),
+        "Vegetation": color_map.get("Vegetation", "#006400"),
+        "Water": color_map.get("Water", "#0064ff"),
+    }
+    positive_long = full.melt(
+        id_vars="borough",
+        value_vars=positive_cols,
+        var_name="class_metric",
+        value_name="positive_delta_pp",
+    )
+    positive_long["class"] = positive_long["class_metric"].str.replace(
+        "_positive_delta_pp", "", regex=False
+    )
+    positive_long["class"] = positive_long["class"].map(class_label_map)
+    borough_totals = full.assign(
+        total_positive_change_pp=full[positive_cols].sum(axis=1)
+    )
+
+    fig = px.bar(
+        positive_long,
+        x="borough",
+        y="positive_delta_pp",
+        color="class",
+        color_discrete_map=class_color_map,
+        barmode="stack",
+    )
+    fig.update_traces(
+        hovertemplate="%{x}<br>%{fullData.name} increase: %{y:.2f}%<extra></extra>",
+    )
+    fig.add_scatter(
+        x=borough_totals["borough"],
+        y=borough_totals["total_positive_change_pp"],
+        mode="text",
+        text=borough_totals["total_positive_change_pp"].map(lambda v: f"{v:.2f}%"),
+        textposition="top center",
+        textfont={"size": 12, "color": "#1f2937"},
+        hoverinfo="skip",
+        showlegend=False,
+    )
+    fig.update_layout(
+        title="Positive Composition Change Across All 10 Boroughs",
+        height=620,
+        margin={"r": 20, "t": 60, "l": 20, "b": 20},
+        xaxis_title="Borough",
+        yaxis_title="Positive composition change (%)",
+        legend_title_text="Class",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+    )
+    fig.update_xaxes(tickangle=-30)
+    fig.update_yaxes(showgrid=False)
+    return fig
+
 
 class PlotSelectionBridge(gr.HTML):
     """Custom Gradio HTML component that emits Plotly selection payloads."""
@@ -77,6 +388,8 @@ class PlotSelectionBridge(gr.HTML):
         self,
         left_plot_id: str,
         right_plot_id: str,
+        borough_plot_id: str | None = None,
+        borough_bounds: dict | None = None,
         *,
         value: dict | None = None,
         label: str | None = None,
@@ -96,6 +409,7 @@ class PlotSelectionBridge(gr.HTML):
         js_on_load = """
         const leftPlotId = props.left_plot_id;
         const rightPlotId = props.right_plot_id;
+        const boroughPlotId = props.borough_plot_id || 'borough_change_plot';
         const statusEl = element.querySelector('#selection-bridge-status');
 
         const SYNC_KEY = '__plotSyncState';
@@ -251,20 +565,75 @@ class PlotSelectionBridge(gr.HTML):
 
         function pushPayload(source, eventKind, eventData) {
             const gridIds = extractGridIds(eventData);
+            pushPayloadWithGridIds(source, eventKind, gridIds, null);
+        }
+
+        function pushPayloadWithGridIds(source, eventKind, gridIds, boroughName) {
             const payload = {
                 source: source,
                 event_kind: eventKind,
                 grid_ids: gridIds,
+                borough: boroughName,
                 ts: Date.now(),
             };
             props.value = payload;
             if (statusEl) {
                 if (gridIds.length > 0) {
-                    statusEl.textContent = `${source}: ${gridIds.length} selected (${gridIds.slice(0, 10).join(', ')}${gridIds.length > 10 ? ', ...' : ''})`;
+                    const boroughPrefix = boroughName ? `${boroughName}: ` : '';
+                    statusEl.textContent = `${boroughPrefix}${source}: ${gridIds.length} selected (${gridIds.slice(0, 10).join(', ')}${gridIds.length > 10 ? ', ...' : ''})`;
                 } else {
                     statusEl.textContent = `${source}: selection cleared`;
                 }
             }
+        }
+
+        function setSelectionOnMap(targetDiv, eventKind, selectedIds) {
+            if (!targetDiv) return;
+            const targetState = ensureSyncState(targetDiv);
+            if (targetState.applyingSelection) {
+                return;
+            }
+
+            targetState.applyingSelection = true;
+            const traces = Array.isArray(targetDiv.data) ? targetDiv.data : [];
+            const traceIndices = traces.map((_, i) => i);
+            if (!traceIndices.length) {
+                targetState.applyingSelection = false;
+                return;
+            }
+
+            if (eventKind === 'deselect' || selectedIds.length === 0) {
+                const clearSelection = traceIndices.map(() => null);
+                Plotly.restyle(targetDiv, { selectedpoints: clearSelection }, traceIndices)
+                    .finally(() => {
+                        targetState.applyingSelection = false;
+                    });
+                return;
+            }
+
+            const targetSelection = selectedPointsByTrace(targetDiv, selectedIds);
+            Plotly.restyle(targetDiv, { selectedpoints: targetSelection }, traceIndices)
+                .finally(() => {
+                    targetState.applyingSelection = false;
+                });
+        }
+
+        function collectGridIdsForBorough(plotlyDiv, boroughName) {
+            if (!plotlyDiv || !boroughName) return [];
+            const ids = [];
+            const traces = Array.isArray(plotlyDiv.data) ? plotlyDiv.data : [];
+            for (const trace of traces) {
+                const customData = trace?.customdata;
+                if (!Array.isArray(customData)) continue;
+                for (const row of customData) {
+                    if (!Array.isArray(row) || row.length < 4) continue;
+                    const rowBorough = row[3];
+                    if (rowBorough !== boroughName) continue;
+                    const id = asInt(row[0]);
+                    if (id !== null) ids.push(id);
+                }
+            }
+            return Array.from(new Set(ids));
         }
 
         function attachHandlers(plotContainer, sourceName, getPeerDiv) {
@@ -313,11 +682,76 @@ class PlotSelectionBridge(gr.HTML):
             return container.querySelector('.js-plotly-plot');
         }
 
+        function attachBoroughHandler(plotContainer) {
+            if (!plotContainer) {
+                return;
+            }
+            const plotlyDiv = plotContainer.querySelector('.js-plotly-plot');
+            if (!plotlyDiv || typeof plotlyDiv.on !== 'function') {
+                return;
+            }
+
+            if (plotContainer.__boroughBridgeBoundTo === plotlyDiv) {
+                return;
+            }
+
+            plotlyDiv.on('plotly_click', (eventData) => {
+                const point = eventData?.points?.[0];
+                const boroughName = (point?.x ?? point?.y ?? '').toString();
+                if (!boroughName) return;
+
+                const leftDiv = getPlotlyDiv(leftPlotId);
+                const rightDiv = getPlotlyDiv(rightPlotId);
+                const selectedIds = Array.from(
+                    new Set([
+                        ...collectGridIdsForBorough(leftDiv, boroughName),
+                        ...collectGridIdsForBorough(rightDiv, boroughName),
+                    ])
+                );
+
+                setSelectionOnMap(leftDiv, 'selected', selectedIds);
+                setSelectionOnMap(rightDiv, 'selected', selectedIds);
+
+                // Zoom to borough on both maps
+                zoomToBorough(leftDiv, boroughName);
+                zoomToBorough(rightDiv, boroughName);
+
+                pushPayloadWithGridIds('borough_change_plot', 'borough_click', selectedIds, boroughName);
+            });
+
+            plotContainer.__boroughBridgeBoundTo = plotlyDiv;
+        }
+
+        function zoomToBorough(plotlyDiv, boroughName) {
+            if (!plotlyDiv || !boroughName) return;
+            const boroughBounds = props.borough_bounds && props.borough_bounds[boroughName];
+            if (!boroughBounds) return;
+
+            const relayout = {
+                'map.center': {
+                    lat: boroughBounds.center_lat,
+                    lon: boroughBounds.center_lon,
+                },
+                'map.zoom': boroughBounds.zoom,
+                'mapbox.center': {
+                    lat: boroughBounds.center_lat,
+                    lon: boroughBounds.center_lon,
+                },
+                'mapbox.zoom': boroughBounds.zoom,
+            };
+
+            Plotly.relayout(plotlyDiv, relayout).catch(() => {
+                // Fail silently if relayout doesn't work
+            });
+        }
+
         function tryAttachAll() {
             const leftContainer = document.getElementById(leftPlotId);
             const rightContainer = document.getElementById(rightPlotId);
+            const boroughContainer = document.getElementById(boroughPlotId);
             attachHandlers(leftContainer, 'selected_year', () => getPlotlyDiv(rightPlotId));
             attachHandlers(rightContainer, 'future_prediction', () => getPlotlyDiv(leftPlotId));
+            attachBoroughHandler(boroughContainer);
         }
 
         const observer = new MutationObserver(() => tryAttachAll());
@@ -333,6 +767,8 @@ class PlotSelectionBridge(gr.HTML):
             js_on_load=js_on_load,
             left_plot_id=left_plot_id,
             right_plot_id=right_plot_id,
+            borough_plot_id=borough_plot_id,
+            borough_bounds=borough_bounds or {},
             label=label,
             **kwargs,
         )
@@ -344,9 +780,9 @@ class PlotSelectionBridge(gr.HTML):
         }
 
 
-def load_data_from_csv(csv_path="data.csv"):
+def load_data_from_csv(data_path):
     # 1. Load CSV data at full resolution (no aggregation)
-    df = pd.read_csv(csv_path)
+    df = pd.read_parquet(data_path)
 
     # 2. Parse geometry from GeoJSON strings
     df["geometry"] = pd.Series(
@@ -404,7 +840,6 @@ def assign_group_dominant_class(
         )
 
     grouped_scores = df.groupby(list(group_columns), dropna=False)[class_columns].sum()
-    print(f"{len(grouped_scores)=} {len(df)=}")
     dominant_idx = np.argmax(grouped_scores.to_numpy(), axis=1)
 
     dominant_per_group = grouped_scores.reset_index()[list(group_columns)]
@@ -476,7 +911,7 @@ def load_prediction_model(model_path="artifacts/XGBoost_delta.pkl"):
 prediction_model = load_prediction_model()
 
 try:
-    gdf = load_data_from_csv("data_3x3/delta_table_2021_3x3.csv")
+    gdf = load_data_from_csv("data_3x3/delta_table_2021_3x3.parquet")
 except Exception as e:
     print(f"Error loading data: {e}")
     import traceback
@@ -506,7 +941,11 @@ color_map = {
 def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_size):
     """Build two maps: selected year (delta=0) and future (delta=time_delta)."""
     if gdf is None:
-        return None, None
+        return (
+            None,
+            None,
+            build_empty_borough_change_plot("No grid data available yet."),
+        )
 
     start_year = int(start_year)
     time_delta = int(time_delta)
@@ -577,9 +1016,14 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             missing_features = [
                 name for name in feature_names if name not in df_out.columns
             ]
-            print(f"delta: {prediction_delta} ; feat: {missing_features}")
             if not missing_features:
-                predicted_targets = prediction_model.predict(df_out[feature_names])
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        category=UserWarning,
+                        message=".*Falling back to prediction using DMatrix.*",
+                    )
+                    predicted_targets = prediction_model.predict(df_out[feature_names])
                 predicted_targets_df = pd.DataFrame(
                     predicted_targets, index=df_out.index, columns=class_cols
                 )
@@ -588,10 +1032,6 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
                     class_cols,
                 )
                 df_out[class_cols] = predicted_targets_df[class_cols]
-            else:
-                print(f"Skipping Prediction: {prediction_model=}; {feature_names=}")
-        else:
-            print(f"Skipping Prediction: {prediction_model=}; {feature_names=}")
 
         df_out = assign_row_dominant_class(df_out, class_cols)
         df_out = assign_group_dominant_class(df_out, class_cols)
@@ -674,6 +1114,24 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
             validate="one_to_one",
         )
 
+        boundaries = BOROUGH_BOUNDARIES_GDF
+        if boundaries is not None and not boundaries.empty:
+            points_gdf = gpd.GeoDataFrame(
+                grid_df[["lat", "lon"]].copy(),
+                geometry=gpd.points_from_xy(grid_df["lon"], grid_df["lat"]),
+                crs="EPSG:4326",
+                index=grid_df.index,
+            )
+            joined = gpd.sjoin(
+                points_gdf,
+                boundaries[["borough", "geometry"]],
+                how="left",
+                predicate="intersects",
+            )
+            grid_df["Borough"] = joined["borough"].fillna("Unassigned").to_numpy()
+        else:
+            grid_df["Borough"] = "Unassigned"
+
         if render_mode == "points":
             # Scatter map with aggregated points at grid cell resolution
             fig = px.scatter_map(
@@ -681,7 +1139,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
                 lat="lat",
                 lon="lon",
                 color="Dominant Class",
-                custom_data=["grid_id", "Dominant Class", "Confidence"],
+                custom_data=["grid_id", "Dominant Class", "Confidence", "Borough"],
                 color_discrete_map=color_map,
                 hover_name=None,
                 hover_data={"grid_id": False, "lat": False, "lon": False},
@@ -697,7 +1155,7 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
                 locations="grid_id",
                 featureidkey="properties.grid_id",
                 color="Dominant Class",
-                custom_data=["grid_id", "Dominant Class", "Confidence"],
+                custom_data=["grid_id", "Dominant Class", "Confidence", "Borough"],
                 color_discrete_map=color_map,
                 hover_name=None,
                 hover_data={"grid_id": False},
@@ -730,15 +1188,15 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         if render_mode == "points":
             fig.update_traces(
                 hovertemplate="Dominant Class: %{customdata[1]}<br>Confidence: %{customdata[2]}<extra></extra>",
-                marker=dict(size=7, opacity=0.4),
-                selected=dict(marker=dict(opacity=0.8)),
-                unselected=dict(marker=dict(opacity=0.1)),
+                marker=dict(size=5, opacity=0.4),
+                selected=dict(marker=dict(opacity=0.4)),
+                unselected=dict(marker=dict(opacity=0.0)),
             )
         else:
             fig.update_traces(
                 hovertemplate="Dominant Class: %{customdata[1]}<br>Confidence: %{customdata[2]}<extra></extra>",
                 marker=dict(opacity=0.3),
-                selected=dict(marker=dict(opacity=0.8)),
+                selected=dict(marker=dict(opacity=0.3)),
                 unselected=dict(marker=dict(opacity=0.0)),
             )
         return fig, grid_df
@@ -756,62 +1214,36 @@ def update_dashboard(start_year, time_delta, map_type, render_mode, grid_cell_si
         build_map(df_item) for df_item in predicted_dfs
     ]
 
-    global LAST_GRID_TABLES, LAST_SUBGRID_TABLES
+    # Ensure fresh submits never inherit prior browser-side selection masks.
+    selected_fig.update_traces(selectedpoints=None)
+    future_fig.update_traces(selectedpoints=None)
+
+    global \
+        LAST_GRID_TABLES, \
+        LAST_SUBGRID_TABLES, \
+        LAST_BOROUGH_CHANGE_FIG, \
+        LAST_MAP_FIGURES
     LAST_GRID_TABLES = {
         "selected_year": selected_grid_df[SELECTION_COLUMNS].copy(),
         "future_prediction": future_grid_df[SELECTION_COLUMNS].copy(),
     }
+    selected_subgrid = build_subgrid_table(predicted_dfs[0])
+    future_subgrid = build_subgrid_table(predicted_dfs[1])
     LAST_SUBGRID_TABLES = {
-        "selected_year": build_subgrid_table(predicted_dfs[0]),
-        "future_prediction": build_subgrid_table(predicted_dfs[1]),
+        "selected_year": selected_subgrid,
+        "future_prediction": future_subgrid,
+    }
+    borough_change_fig = build_top_changed_boroughs_chart(
+        selected_subgrid,
+        future_subgrid,
+    )
+    LAST_BOROUGH_CHANGE_FIG = borough_change_fig
+    LAST_MAP_FIGURES = {
+        "selected_year": go.Figure(selected_fig),
+        "future_prediction": go.Figure(future_fig),
     }
 
-    # # 3. Mock the Evaluation Metrics
-    # acc = f"{np.random.uniform(85, 93):.1f}%"
-    # fcr = f"{np.random.uniform(4, 9):.1f}%"
-    # stability = f"{np.random.uniform(92, 98):.1f}%"
-
-    # metrics_display = f"""
-    # * **Baseline Accuracy:** {acc}
-    # * **False Change Rate:** {fcr}
-    # * **Stability (Unchanged):** {stability}
-    # """
-
-    # return fig, metrics_display
-    selected_pred_df, future_pred_df = predicted_dfs
-    numeric_diff_mask = (
-        ~np.isclose(
-            selected_pred_df[class_cols].to_numpy(),
-            future_pred_df[class_cols].to_numpy(),
-            rtol=1e-6,
-            atol=1e-8,
-            equal_nan=True,
-        )
-    ).any(axis=1)
-    dominant_diff_mask = (
-        selected_pred_df["Dominant Class"].to_numpy()
-        != future_pred_df["Dominant Class"].to_numpy()
-    )
-    diff_mask = numeric_diff_mask | dominant_diff_mask
-
-    if diff_mask.any():
-        differing_rows = pd.concat(
-            [
-                selected_pred_df.loc[
-                    diff_mask, ["grid_id", "Dominant Class", *class_cols]
-                ].add_suffix("_selected"),
-                future_pred_df.loc[
-                    diff_mask, ["grid_id", "Dominant Class", *class_cols]
-                ].add_suffix("_future"),
-            ],
-            axis=1,
-        )
-        print(f"Differing prediction rows: {len(differing_rows)}")
-        print(differing_rows.head(20).to_string(index=False))
-    else:
-        print("No differing rows between selected and future predictions.")
-
-    return selected_fig, future_fig
+    return selected_fig, future_fig, borough_change_fig
 
 
 def selection_payload_to_outputs(payload: dict | None):
@@ -821,47 +1253,29 @@ def selection_payload_to_outputs(payload: dict | None):
     def visible_plot_update(fig: go.Figure):
         return gr.update(value=fig, visible=True)
 
-    def build_empty_pie(title: str, message: str) -> go.Figure:
-        fig = go.Figure()
-        fig.update_layout(
-            title=title,
-            height=340,
-            margin={"r": 10, "t": 50, "l": 10, "b": 10},
-            annotations=[
-                {
-                    "text": message,
-                    "x": 0.5,
-                    "y": 0.5,
-                    "xref": "paper",
-                    "yref": "paper",
-                    "showarrow": False,
-                    "font": {"size": 14},
-                }
-            ],
-        )
-        return fig
+    def visible_borough_or_placeholder():
+        fig = LAST_BOROUGH_CHANGE_FIG
+        if fig is None:
+            return gr.update(value=None, visible=True)
+        return gr.update(value=fig, visible=True)
 
-    def build_empty_delta(title: str, message: str) -> go.Figure:
-        fig = go.Figure()
-        fig.update_layout(
-            title=title,
-            height=290,
-            margin={"r": 30, "t": 50, "l": 30, "b": 30},
-            xaxis_title="Delta (percentage points)",
-            yaxis_title="Land Cover",
-            annotations=[
-                {
-                    "text": message,
-                    "x": 0.5,
-                    "y": 0.5,
-                    "xref": "paper",
-                    "yref": "paper",
-                    "showarrow": False,
-                    "font": {"size": 14},
-                }
-            ],
+    def selected_empty_update(message: str):
+        return gr.update(
+            value=build_empty_pie("Selected Year Composition", message),
+            visible="hidden",
         )
-        return fig
+
+    def future_empty_update(message: str):
+        return gr.update(
+            value=build_empty_pie("Future Prediction Composition", message),
+            visible="hidden",
+        )
+
+    def delta_empty_update(message: str):
+        return gr.update(
+            value=build_empty_delta("Land-Cover Composition Delta", message),
+            visible="hidden",
+        )
 
     def build_land_cover_composition(subgrid_df: pd.DataFrame) -> pd.DataFrame:
         if subgrid_df.empty:
@@ -974,7 +1388,7 @@ def selection_payload_to_outputs(payload: dict | None):
         fig.update_traces(
             texttemplate="%{x:.2f}",
             textposition="outside",
-            hovertemplate="%{y}: %{x:.2f} pp<extra></extra>",
+            hovertemplate="%{y}: %{x:.2f}%<extra></extra>",
         )
         fig.update_layout(
             title="Land-Cover Composition Delta (Future - Selected Year)",
@@ -991,10 +1405,19 @@ def selection_payload_to_outputs(payload: dict | None):
     if not payload or not isinstance(payload, dict):
         return (
             DEFAULT_SELECTION_MESSAGE,
-            hidden_plot_update(),
-            hidden_plot_update(),
-            hidden_plot_update(),
+            selected_empty_update("Waiting for selection"),
+            future_empty_update("Waiting for selection"),
+            delta_empty_update("Waiting for selection"),
+            visible_borough_or_placeholder(),
         )
+
+    payload_ts = payload.get("ts")
+    event_kind = payload.get("event_kind")
+    borough_name = payload.get("borough")
+    try:
+        payload_ts = int(payload_ts) if payload_ts is not None else None
+    except Exception:
+        payload_ts = None
 
     raw_ids = payload.get("grid_ids") or []
 
@@ -1009,12 +1432,29 @@ def selection_payload_to_outputs(payload: dict | None):
             seen.add(as_int)
             grid_ids.append(as_int)
 
+    # Ignore only empty bridge events emitted during plot re-render right after submit.
+    # Keep non-empty events so the very first real user selection is not dropped.
+    if (
+        event_kind != "borough_click"
+        and payload_ts is not None
+        and payload_ts < (LAST_SUBMIT_TS_MS + SELECTION_EVENT_GUARD_MS)
+        and not grid_ids
+    ):
+        return (
+            DEFAULT_SELECTION_MESSAGE,
+            selected_empty_update("Waiting for selection"),
+            future_empty_update("Waiting for selection"),
+            delta_empty_update("Waiting for selection"),
+            visible_borough_or_placeholder(),
+        )
+
     if not grid_ids:
         return (
             DEFAULT_SELECTION_MESSAGE,
-            hidden_plot_update(),
-            hidden_plot_update(),
-            hidden_plot_update(),
+            selected_empty_update("Selection cleared"),
+            future_empty_update("Selection cleared"),
+            delta_empty_update("Selection cleared"),
+            visible_borough_or_placeholder(),
         )
 
     selected_subgrid_table = LAST_SUBGRID_TABLES.get("selected_year")
@@ -1022,16 +1462,18 @@ def selection_payload_to_outputs(payload: dict | None):
     if selected_subgrid_table is None or selected_subgrid_table.empty:
         return (
             "Selected-year sub-grid data is not available yet. Click Submit and select a region.",
-            hidden_plot_update(),
-            hidden_plot_update(),
-            hidden_plot_update(),
+            selected_empty_update("No selected-year sub-grid data"),
+            future_empty_update("No future sub-grid data"),
+            delta_empty_update("No selected sub-grid data"),
+            visible_borough_or_placeholder(),
         )
     if future_subgrid_table is None or future_subgrid_table.empty:
         return (
             "Future-year sub-grid data is not available yet. Click Submit and select a region.",
-            hidden_plot_update(),
-            hidden_plot_update(),
-            hidden_plot_update(),
+            selected_empty_update("No selected-year sub-grid data"),
+            future_empty_update("No future sub-grid data"),
+            delta_empty_update("No selected sub-grid data"),
+            visible_borough_or_placeholder(),
         )
 
     selected_subgrid_rows = selected_subgrid_table[
@@ -1068,8 +1510,9 @@ def selection_payload_to_outputs(payload: dict | None):
     delta_df = pd.DataFrame(delta_rows)
     delta_plot = build_delta_plot(delta_df)
 
+    summary_prefix = f"Selection ({borough_name}): " if borough_name else "Selection: "
     summary = (
-        f"Selection: {len(grid_ids)} parent grids | "
+        f"{summary_prefix}{len(grid_ids)} parent grids | "
         f"{len(selected_subgrid_rows)} selected-year sub-grids | "
         f"{len(future_subgrid_rows)} future sub-grids."
     )
@@ -1078,11 +1521,39 @@ def selection_payload_to_outputs(payload: dict | None):
         visible_plot_update(selected_pie),
         visible_plot_update(future_pie),
         visible_plot_update(delta_plot),
+        hidden_plot_update(),
     )
 
 
 def reset_selection_insights():
     return selection_payload_to_outputs(None)
+
+
+def clear_selection_without_recompute():
+    def clear_selectedpoints(fig: go.Figure | None):
+        if fig is None:
+            return gr.update()
+        fig_out = go.Figure(fig)
+        fig_out.update_traces(selectedpoints=None)
+        return gr.update(value=fig_out)
+
+    left_map_update = clear_selectedpoints(LAST_MAP_FIGURES.get("selected_year"))
+    right_map_update = clear_selectedpoints(LAST_MAP_FIGURES.get("future_prediction"))
+
+    summary, selected_pie_update, future_pie_update, delta_update, borough_update = (
+        selection_payload_to_outputs({"event_kind": "deselect", "grid_ids": []})
+    )
+
+    return (
+        left_map_update,
+        right_map_update,
+        {},
+        summary,
+        selected_pie_update,
+        future_pie_update,
+        delta_update,
+        borough_update,
+    )
 
 
 def build_map_titles(start_year, time_delta):
@@ -1103,7 +1574,7 @@ def update_dashboard_with_titles(
     render_mode,
     grid_cell_size,
 ):
-    selected_fig, future_fig = update_dashboard(
+    selected_fig, future_fig, borough_change_fig = update_dashboard(
         start_year=start_year,
         time_delta=time_delta,
         map_type=map_type,
@@ -1111,14 +1582,61 @@ def update_dashboard_with_titles(
         grid_cell_size=grid_cell_size,
     )
     left_title, right_title = build_map_titles(start_year, time_delta)
-    return selected_fig, future_fig, left_title, right_title
+    return selected_fig, future_fig, borough_change_fig, left_title, right_title
+
+
+def submit_all_outputs(
+    start_year,
+    time_delta,
+    map_type,
+    render_mode,
+    grid_cell_size,
+):
+    global LAST_SUBMIT_TS_MS
+    LAST_SUBMIT_TS_MS = int(time.time() * 1000)
+
+    selected_fig, future_fig, borough_change_fig, left_title, right_title = (
+        update_dashboard_with_titles(
+            start_year=start_year,
+            time_delta=time_delta,
+            map_type=map_type,
+            render_mode=render_mode,
+            grid_cell_size=grid_cell_size,
+        )
+    )
+    summary = DEFAULT_SELECTION_MESSAGE
+    selected_pie_update = gr.update(
+        value=build_empty_pie("Selected Year Composition", "Waiting for selection"),
+        visible="hidden",
+    )
+    future_pie_update = gr.update(
+        value=build_empty_pie("Future Prediction Composition", "Waiting for selection"),
+        visible="hidden",
+    )
+    delta_update = gr.update(
+        value=build_empty_delta(
+            "Land-Cover Composition Delta", "Waiting for selection"
+        ),
+        visible="hidden",
+    )
+    borough_update = gr.update(value=borough_change_fig, visible=True)
+    return (
+        selected_fig,
+        future_fig,
+        left_title,
+        right_title,
+        {},
+        summary,
+        selected_pie_update,
+        future_pie_update,
+        delta_update,
+        borough_update,
+    )
 
 
 # Gradio UI
 with gr.Blocks(fill_height=True) as app:
     gr.Markdown("# 🏙️ Nuremberg Future Land-Cover Prediction")
-    # gr.Markdown("# 🏙️ Nuremberg Urban Dynamics Dashboard")
-    # gr.Markdown("## Future Land-Cover Prediction")
 
     with gr.Row():
         map_type_radio = gr.Radio(
@@ -1152,15 +1670,9 @@ with gr.Blocks(fill_height=True) as app:
             value=0,
             label="Future Time (Years)",
         )
-        submit_button = gr.Button("Submit", variant="primary")
-
-    # TODO: Remove if unused
-    # with gr.Row():
-    #     clear_selection_button = gr.Button("Reset Map")
-
-    # TODO: Move to a new row?
-    # gr.Markdown("### 📊 Performance Metrics")
-    # metrics_box = gr.Markdown(value="*Loading metrics...*")
+        with gr.Column(scale=1, min_width=140):
+            submit_button = gr.Button("Submit", variant="primary")
+            deselect_button = gr.Button("Deselect", variant="secondary")
 
     with gr.Row():
         with gr.Column():
@@ -1173,6 +1685,8 @@ with gr.Blocks(fill_height=True) as app:
     selection_bridge = PlotSelectionBridge(
         left_plot_id="map_output_left",
         right_plot_id="map_output_right",
+        borough_plot_id="borough_change_plot",
+        borough_bounds=calculate_borough_bounds(),
         label="Selection Bridge",
         visible="hidden",
     )
@@ -1181,21 +1695,31 @@ with gr.Blocks(fill_height=True) as app:
         with gr.Column():
             selected_year_pie = gr.Plot(
                 show_label=False,
-                value=None,
-                visible=False,
+                value=build_empty_pie("Selected Year Composition", "Submit to begin"),
+                visible="hidden",
             )
         with gr.Column():
             future_year_pie = gr.Plot(
                 show_label=False,
-                value=None,
-                visible=False,
+                value=build_empty_pie(
+                    "Future Prediction Composition", "Submit to begin"
+                ),
+                visible="hidden",
             )
 
     with gr.Row():
         delta_plot = gr.Plot(
             show_label=False,
+            value=build_empty_delta("Land-Cover Composition Delta", "Submit to begin"),
+            visible="hidden",
+        )
+
+    with gr.Row():
+        borough_change_plot = gr.Plot(
+            show_label=False,
             value=None,
-            visible=False,
+            visible=True,
+            elem_id="borough_change_plot",
         )
 
     with gr.Row():
@@ -1212,7 +1736,7 @@ with gr.Blocks(fill_height=True) as app:
         """)
 
     update_args = {
-        "fn": update_dashboard_with_titles,
+        "fn": submit_all_outputs,
         "inputs": [
             start_year_dropdown,
             time_delta_drop_down,
@@ -1220,31 +1744,45 @@ with gr.Blocks(fill_height=True) as app:
             render_mode_radio,
             grid_cell_size_dropdown,
         ],
-        "outputs": [map_output_left, map_output_right, left_map_title, right_map_title],
+        "outputs": [
+            map_output_left,
+            map_output_right,
+            left_map_title,
+            right_map_title,
+            selection_bridge,
+            selection_summary,
+            selected_year_pie,
+            future_year_pie,
+            delta_plot,
+            borough_change_plot,
+        ],
     }
     submit_button.click(**update_args)
-    submit_button.click(
-        fn=reset_selection_insights,
-        inputs=None,
-        outputs=[selection_summary, selected_year_pie, future_year_pie, delta_plot],
+    deselect_button.click(
+        fn=clear_selection_without_recompute,
+        inputs=[],
+        outputs=[
+            map_output_left,
+            map_output_right,
+            selection_bridge,
+            selection_summary,
+            selected_year_pie,
+            future_year_pie,
+            delta_plot,
+            borough_change_plot,
+        ],
     )
     selection_bridge.change(
         fn=selection_payload_to_outputs,
         inputs=[selection_bridge],
-        outputs=[selection_summary, selected_year_pie, future_year_pie, delta_plot],
+        outputs=[
+            selection_summary,
+            selected_year_pie,
+            future_year_pie,
+            delta_plot,
+            borough_change_plot,
+        ],
     )
-    # clear_selection_button.click(**update_args)
-    # app.load(**update_args)
-
-# TODO: remove if unused
-# css = """
-# /* Force the Plotly modebar to the top-left corner */
-# .modebar-container {
-#     left: 10px !important;
-#     right: auto !important;
-#     top: 10px !important;
-# }
-# """
 
 theme = Ocean()
 if __name__ == "__main__":
