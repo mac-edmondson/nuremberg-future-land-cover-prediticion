@@ -1,0 +1,67 @@
+\documentclass[a4paper,fleqn]{cas-dc}
+\usepackage[numbers]{natbib}
+\usepackage{hyperref}
+
+%%% Author macros
+\def\tsc#1{\csdef{#1}{\textsc{\lowercase{#1}}\xspace}}
+\tsc{WGM}
+\tsc{QE}
+
+\begin{document}
+\let\WriteBookmarks\relax
+\def\floatpagepagefraction{1}
+\def\textpagefraction{.001}
+
+% Short title
+\shorttitle{Multi-View Framework for Performance Classification in FPS Gaming}  
+
+% Short author
+\shortauthors{Prajapati et al.}  
+
+% Main title of the paper
+\title [mode = title]{MV-FPS: A Multi-View sEMG-Based Framework for Performance Classification in First-Person Shooter Gaming}
+
+% Authors and their affiliations
+\author[1]{Vaibhav Prajapati}
+\cormark[1]
+
+\author[1]{Anish C. Turlapaty}
+\author[2]{Himangshu Sarma}
+\author[2]{Mrinmoy Ghorai}
+
+\tnotetext[0]{
+\begin{minipage}{\textwidth}
+\vspace{1em}
+\textsuperscript{⁎} Corresponding author. \\
+\textit{Email addresse}s: vaibhavprajapati0101@gmail.com (V. Prajapati), anish.turlapaty@iiits.in (A.C. Turlapaty), himangshu.sarma@iiits.in (H. Sarma), \\ mrinmoy.ghorai@iiits.in (M. Ghorai).
+\end{minipage}
+}
+
+% Affiliations
+\affiliation[1]{organization={Human Movement Analysis Lab, Dept. of Electronics and Communication Engineering, Indian Institute of Information Technology Sri City}, 
+    country={India}}
+
+\affiliation[2]{organization={Human Computer Interaction Lab, Dept. of Computer Science and Engineering, Indian Institute of Information Technology Sri City},
+    country={India}}
+
+% Abstract
+\begin{abstract}
+A multi-view, performance-driven classification framework is proposed to investigate neuromuscular correlates of gaming proficiency in first-person shooter (FPS) environments using surface electromyography (sEMG). A comprehensive multi-modal dataset was developed through controlled experiments with twelve subjects playing the FPS game Valorant in one-hour sessions. Across 960 trials, data were collected using four mouse models, two weapons (Vandal, Guardian), and two difficulty modes (Medium, Hard). Each trial included five-channel sEMG from key forearm muscles, trial-wise performance scores, gameplay recordings, Leap Motion trajectories, and side-angle hand videos. For this study, only sEMG signals and performance scores were analyzed. A novel quadrant-based labeling scheme was introduced by computing median performance scores per game mode, categorizing trials into four performance quadrants. A stacking ensemble architecture was proposed, consisting of three BiLSTM models and one LSTM model to extract time-domain, frequency-domain, cross-channel, and coherence-based features. Their outputs were integrated using a Random Forest meta-classifier. Results underscore the predictive significance of the Extensor Carpi Radialis (ECR), showing consistent activation in high-performing trials. Features such as cepstral coefficients, slope sign changes, Willison amplitude, and zero crossings were particularly discriminative. Synergistic patterns between ECR and Abductor Pollicis Longus (APL), as well as cross-muscle interactions (e.g., ECU–APL, ECU–FDI, APL–FDI), further enhanced classification. While the underlying physiological mechanisms remain an open question, findings suggest coordinated muscle activity plays a critical role in gaming performance. This study introduces a novel dataset and a physiologically grounded framework for FPS skill classification, with implications for personalized training, esports analytics, and ergonomic game design.
+\end{abstract}
+
+% Keywords
+\begin{keywords}
+First Person Shooter (FPS) Games \sep Electromyography (EMG) \sep Muscle Activation \sep Ensemble Deep Learning \sep Performance Prediction
+\end{keywords}
+
+\maketitle
+
+% Main text
+\section{Introduction}\label{sec:intro}
+ABC \cite{Fortunato2010}
+
+% Bibliography
+\bibliographystyle{refs-style}
+\bibliography{refs}
+
+\end{document}
