@@ -1,0 +1,20 @@
+XGBoost Performance under Gaussian Noise
+--------------------
+5% Gaussian Noise
+Train R²: 0.8926
+Test R²: 0.8719
+Train RMSE: 0.1136
+Test RMSE: 0.1273
+--------------------
+10% Gaussian Noise
+Train R²: 0.8830
+Test R²: 0.8629
+Train RMSE: 0.1189
+Test RMSE: 0.1320
+--------------------
+25% Gaussian Noise
+Train R²: 0.8237
+Test R²: 0.8070
+Train RMSE: 0.1467
+Test RMSE: 0.1575
+--------------------
