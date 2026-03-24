@@ -23,7 +23,6 @@ Follow these steps from the repository root directory.
 1. Pull Git LFS files before setup.
 
 ```bash
-git lfs install
 git lfs pull
 ```
 
