@@ -87,7 +87,7 @@ The framework evaluates a progression of predictive models, from linear baseline
 
 ### Code and Reproducibility
 The proposed pipeline is implemented in Python using scikit-learn and XGBoost, with data processing performed via Google Earth Engine. Experiments follow a temporal hold-out strategy with fixed random seeds to ensure reproducibility. All model configurations and feature engineering steps are deterministic and documented. 
-* **Datasets, Trained model artifacts, and supporting resources** : The codebase is publicly available at [https://drive.google.com/drive/u/3/folders/10M3mDetJYfQdM5GE7GPRY6Q_9u-eyJZJ]
+* **Datasets, Trained model artifacts, and supporting resources** : The codebase is publicly available on [Google Drive](https://drive.google.com/drive/u/3/folders/10M3mDetJYfQdM5GE7GPRY6Q_9u-eyJZ)
 
 ### Acknowledgements
 We acknowledge the use of large language models, including ChatGPT (OpenAI) and Gemini(Google) was used for assistance in writing, editing and refining the presentation of this work. We thank the European Space Agency (ESA) for Sentinel-2 and WorldCover data, and Google Earth Engine for large-scale geospatial processing.
