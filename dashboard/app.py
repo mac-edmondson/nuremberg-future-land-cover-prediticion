@@ -1723,13 +1723,14 @@ with gr.Blocks(fill_height=True) as app:
 
     with gr.Row():
         gr.Markdown("""
-        ---
-        ### ⚠️ Limitations & Disclosures
-        * **DO NOT** use for zoning or building permits.
-        * Prediction model is aggregated at the grid level.
-        * Labels contain inherent noise and historical errors.
-        * Model relies on historical trends and cannot predict external shocks or abrupt policy shifts.
-        """)
+            ---
+            ### ⚠️ Limitations & Disclosures
+            * **Not for Official Use:** This tool is designed for exploratory analysis and high-level insights, and is not intended to replace high-resolution surveys or official land-use assessments.
+            * **Grid Resolution Constraints:** Predictions are aggregated at a 20x20 meter grid level, which may obscure fine-grained land-cover patterns. Predictions are generally less reliable in mixed-use transition regions where a single cell contains heterogeneous land cover.
+            * **Historical Label Noise:** The model is trained on ESA WorldCover labels from 2020/2021, which have an estimated accuracy of 70-75%. Inherent noise in these satellite-derived labels impacts the model's baseline accuracy.
+            * **Seasonal & Temporal Ambiguity:** Short-term seasonal fluctuations (e.g., temporary vegetation changes) can sometimes be mistaken by the model for genuine land-cover conversion. Furthermore, prediction uncertainty is largest significantly for short-term (0 years) and long-term forecasts (4 years out).
+            * **Confidence vs. Reality:** The displayed "Confidence" estimate reflects the model's internal mathematical certainty, not necessarily true ground-truth reliability.
+            """)
 
     update_args = {
         "fn": submit_all_outputs,
