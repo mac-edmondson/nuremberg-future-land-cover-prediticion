@@ -10,6 +10,7 @@ This project provides a tabular machine learning framework and interactive dashb
 
 ![Dashboard Demo](docs/assets/dashboard_demo.gif)
 
+### Try it online through [Hugging Face Spaces](https://huggingface.co/spaces/VaibhavdLights/Nuremberg_Land_Cover_Change_Prediction)
 
 ### Running the dashboard
 
